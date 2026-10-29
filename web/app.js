@@ -38,6 +38,8 @@ const fmtTime = ts => new Date(ts * 1000).toLocaleString("ru-RU", { day: "2-digi
 const opts = (list, val) => list.map(([v, t]) => `<option value="${v}" ${v === (val || "") ? "selected" : ""}>${t}</option>`).join("");
 const pill = st => STATUS[st] ? `<span class="pill ${STATUS[st][1]}">${st === "running" ? '<span class="pulse"></span>' : ""}${STATUS[st][0]}</span>` : "";
 const project = () => S.state?.projects.find(p => p.id === S.projectId);
+// #12 в уже экранированном тексте -> ссылка, открывающая карточку задачи
+const refs = html => html.replace(/(^|[\s(>«,;:])#(\d+)\b/g, (_, pre, id) => `${pre}<a href="#" class="tref" onclick="event.preventDefault(); App.openTask(${id})">#${id}</a>`);
 
 // ---------------- загрузка ----------------
 // Запросы одного вида не упорядочены: ответ, после которого ушёл более новый запрос, устарел и отбрасывается.
@@ -173,7 +175,8 @@ function cardHtml(t) {
     <div class="title">${esc(t.title)}</div>
     <div class="meta"><span>#${t.id}</span>${pill(t.status)}
       ${t.open_q ? `<span class="pill st-waiting">вопросов: ${t.open_q}</span>` : ""}
-      ${t.model ? `<span>${esc(t.model)}</span>` : ""}</div>
+      ${t.model ? `<span>${esc(t.model)}</span>` : ""}
+      ${t.links ? `<span class="links-n" title="Связанных задач: ${t.links}">🔗${t.links}</span>` : ""}</div>
     ${t.summary && t.status === "done" ? `<div class="summary">${esc(t.summary)}</div>` : ""}
     ${t.status === "error" && t.error ? `<div class="summary" style="color:var(--err)">${esc(t.error.slice(0, 200))}</div>` : ""}
   </div>`;
@@ -243,25 +246,73 @@ async function openTask(id) {
   modal(`
     <div class="row"><input class="title-input grow" id="tt-title" value="${esc(t.title)}"><span class="muted">#${t.id}</span></div>
     <div class="row muted" style="font-size:12px;margin:2px 4px 0" id="tt-line"></div>
-    <label>Описание</label><textarea id="tt-desc" rows="6">${esc(t.description || "")}</textarea>
+    <label>Описание</label><textarea id="tt-desc" rows="6" oninput="App.renderRefs()">${esc(t.description || "")}</textarea>
+    <div class="refs muted" id="tt-refs"></div>
     <div class="row" style="align-items:flex-end">
       <div class="grow"><label>Модель</label><select id="tt-model">${opts(MODELS, t.model)}</select></div>
       <div class="grow"><label>Effort</label><select id="tt-effort">${opts(EFFORTS, t.effort)}</select></div>
       <button onclick="App.saveTask()">Сохранить</button>
     </div>
     <div id="tt-dyn"></div>
+    <label>Связанные задачи <span class="muted">— агент увидит их итоги и пути к отчётам</span></label>
+    <div class="links" id="tt-links"></div>
+    <div class="link-add"><input id="tt-link" placeholder="Связать с задачей: номер или часть заголовка" autocomplete="off"
+      oninput="App.linkSearch()" onblur="$('#tt-link-res').classList.add('hidden')" onkeydown="if(event.key==='Enter'){event.preventDefault();App.linkPick(0)}"><div class="link-res hidden" id="tt-link-res"></div></div>
     <label>Ход работы</label>
     <div class="timeline" id="tt-tl">${t.events.map(evHtml).join("") || '<div class="muted">Пока пусто</div>'}</div>
     <div class="row" style="margin-top:8px"><input id="tt-comment" placeholder="Комментарий к задаче (агент увидит при следующем запуске)" onkeydown="if(event.key==='Enter')App.comment()"><button onclick="App.comment()">Добавить</button></div>
     <div class="actions" id="tt-actions"></div>`, "wide");
-  renderTaskDyn();
+  renderTaskDyn(); renderRefs();
   const tl = $("#tt-tl"); tl.scrollTop = tl.scrollHeight;
 }
+
+// номера задач, упомянутые в описании: textarea ссылки не покажет, выводим их строкой под ним
+function renderRefs() {
+  const el = $("#tt-refs");
+  if (!el) return;
+  const ids = [...new Set([...($("#tt-desc").value.matchAll(/(?:^|[\s(«,;:])#(\d+)\b/g))].map(m => m[1]))];
+  el.innerHTML = ids.length ? "Упомянуты: " + refs(ids.map(i => "#" + i).join(" ")) : "";
+}
+
+function renderLinks() {
+  const t = S.task, el = $("#tt-links");
+  if (!t || !el) return;
+  el.innerHTML = t.links.map(l => `<div class="link-item">
+      <a href="#" onclick="event.preventDefault(); App.openTask(${l.id})"><span class="muted">#${l.id}</span> ${esc(l.title)}</a>
+      <span class="muted">${esc(l.column_name)}${l.project_id !== t.project_id ? ` · ${esc(l.project_name)}` : ""}</span>${pill(l.status)}
+      <span class="grow"></span><button class="ghost" title="Убрать связь" onclick="App.unlinkTask(${l.id})">✕</button>
+    </div>`).join("") || '<div class="muted">Нет</div>';
+}
+
+const linkSearch = debounce(async () => {
+  const inp = $("#tt-link"), box = $("#tt-link-res"), t = S.task;
+  if (!inp || !t) return;
+  const q = inp.value.trim(), ok = fresh("linksearch");
+  if (!q) { S.linkRes = []; return box.classList.add("hidden"); }
+  const skip = [t.id, ...t.links.map(l => l.id)].join(",");
+  const res = await api("GET", `/api/tasks?q=${encodeURIComponent(q)}&exclude=${skip}`).catch(() => []);
+  if (!ok()) return;
+  S.linkRes = res;
+  box.innerHTML = res.map((r, i) => `<div class="link-opt" onmousedown="event.preventDefault(); App.linkPick(${i})">
+      <span class="muted">#${r.id}</span> ${esc(r.title)} <span class="muted">· ${esc(r.column_name)}${r.project_id !== t.project_id ? ` · ${esc(r.project_name)}` : ""}</span></div>`).join("")
+    || '<div class="muted" style="padding:6px 10px">Ничего не нашлось</div>';
+  box.classList.remove("hidden");
+}, 200);
+
+async function linkPick(i) {
+  const r = S.linkRes?.[i], t = S.task;
+  if (!r || !t) return;
+  await api("POST", `/api/tasks/${t.id}/links`, { task_id: r.id });
+  $("#tt-link").value = ""; S.linkRes = []; $("#tt-link-res").classList.add("hidden");
+  refreshTask();
+}
+
+async function unlinkTask(id) { await api("DELETE", `/api/tasks/${S.task.id}/links/${id}`); refreshTask(); }
 
 function renderTaskDyn() {
   const t = S.task;
   if (!t || !$("#tt-dyn")) return;
-  $("#tt-line").innerHTML = `${esc(t.column_name)} ${pill(t.status)} ${t.cost_usd ? `· ≈$${t.cost_usd.toFixed(2)} (эквивалент API)` : ""}
+  $("#tt-line").innerHTML = `${t.project_id !== S.projectId ? `${esc(t.project_name)} · ` : ""}${esc(t.column_name)} ${pill(t.status)} ${t.cost_usd ? `· ≈$${t.cost_usd.toFixed(2)} (эквивалент API)` : ""}
     ${t.session_id ? `· сессия <code title="claude --resume ${t.session_id}">${t.session_id.slice(0, 8)}</code>` : ""}`;
   const open = t.questions.filter(q => q.status === "open");
   let html = "";
@@ -269,6 +320,7 @@ function renderTaskDyn() {
   if (t.summary) html += `<div class="callout ok"><b>Итог:</b> ${esc(t.summary)} ${t.report_path ? ` · <a href="/report/${t.id}" target="_blank">подробный отчёт →</a>` : ""}</div>`;
   if (open.length) html += `<label>Ждёт ответа</label>` + open.map(q => questionHtml(q, false)).join("");
   $("#tt-dyn").innerHTML = html;
+  renderLinks();
   $("#tt-actions").innerHTML = `
     <button class="danger" onclick="App.deleteTask(${t.id})">Удалить</button>
     ${t.session_id && !t.running ? `<button onclick="App.resetTask(${t.id})" title="Следующий запуск начнётся с чистой сессии">Сбросить сессию</button>` : ""}
@@ -280,7 +332,7 @@ function renderTaskDyn() {
 
 const EV_NAMES = { text: "Claude", tool: "", progress: "Прогресс", question: "Вопрос", answer: "Ответ", comment: "Ты", system: "Система", finish: "Готово", error: "Ошибка" };
 function evHtml(e) {
-  const body = e.kind === "text" ? `<div class="body md">${md(e.text)}</div>` : `<span class="body">${esc(e.text)}</span>`;
+  const body = e.kind === "text" ? `<div class="body md">${refs(md(e.text))}</div>` : `<span class="body">${refs(esc(e.text))}</span>`;
   return `<div class="ev ${e.kind}"><span class="t">${fmtTime(e.ts)}</span>${EV_NAMES[e.kind] ? `<span class="k">${EV_NAMES[e.kind]}</span>` : ""}${body}</div>`;
 }
 
@@ -309,8 +361,11 @@ async function comment() {
 }
 
 async function toTodo(id) {
-  const col = S.board.columns.find(c => c.kind === "todo");
-  await api("POST", `/api/tasks/${id}/move`, { column_id: col.id, order: [...S.board.tasks.filter(t => t.column_id === col.id).map(t => t.id), id] });
+  // карточка могла открыться по ссылке из другого проекта — колонки берём с её доски
+  const pid = S.task?.id === id ? S.task.project_id : S.projectId;
+  const b = pid === S.board.project.id ? S.board : await api("GET", `/api/projects/${pid}/board`);
+  const col = b.columns.find(c => c.kind === "todo");
+  await api("POST", `/api/tasks/${id}/move`, { column_id: col.id, order: [...b.tasks.filter(t => t.column_id === col.id).map(t => t.id), id] });
   loadBoard(); refreshTask();
 }
 
@@ -622,9 +677,9 @@ function renderChat(toBottom) {
 }
 
 const msgHtml = m => {
-  if (m.role === "assistant") return `<div class="msg assistant md">${md(m.text)}</div>`;
+  if (m.role === "assistant") return `<div class="msg assistant md">${refs(md(m.text))}</div>`;
   const atts = m.attachments?.length ? `<div class="msg-atts">${m.attachments.map((a, i) => attHtml(m.id, a, i)).join("")}</div>` : "";
-  return `<div class="msg ${m.role}">${m.text ? esc(m.text) : ""}${atts}</div>`;
+  return `<div class="msg ${m.role}">${m.text ? refs(esc(m.text)) : ""}${atts}</div>`;
 };
 
 const isImage = type => /^image\/(png|jpeg|gif|webp|bmp)$/.test(type || "");
@@ -890,6 +945,7 @@ document.addEventListener("click", e => {
 window.App = {
   setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
   newTask, createTask, openTask, saveTask, comment, toTodo, stopTask, resetTask, deleteTask, closeModal,
+  renderRefs, linkSearch, linkPick, unlinkTask,
   answer, answerText, toggleAnswered, setSetting, clearPause, restartTracker, addColumn, columnMenu,
   checkUpdate, applyUpdate, toggleUpdList, hideUpdate,
   importDialog, importParse, importCommit, toggleChat, chatSend, chatStop, chatNew, toggleChatList, openChat, renameChat, retitleChat, deleteChat, removeAtt, togglePipeline,

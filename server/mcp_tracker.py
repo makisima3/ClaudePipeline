@@ -21,6 +21,7 @@ def S(props, required=()):
 
 STR = {"type": "string"}
 INT = {"type": "integer"}
+IDS = {"type": "array", "items": INT}
 
 APPROVE = {
     "name": "approve",
@@ -30,8 +31,14 @@ APPROVE = {
 CREATE_TASK = {
     "name": "create_task",
     "description": "Создать задачу в трекере. column: 'backlog' (по умолчанию), 'todo' (сразу в работу) или имя колонки. "
-                   "project_id — если не текущий проект.",
-    "inputSchema": S({"title": STR, "description": STR, "column": STR, "project_id": INT}, ["title"]),
+                   "project_id — если не текущий проект. links — id задач, нужных для контекста: связь видна в обеих "
+                   "карточках, а агент получит их итоги и пути к отчётам.",
+    "inputSchema": S({"title": STR, "description": STR, "column": STR, "project_id": INT, "links": IDS}, ["title"]),
+}
+GET_TASK = {
+    "name": "get_task",
+    "description": "Подробности задачи: описание, статус, итог, отчёт, последние события, вопросы, связанные задачи.",
+    "inputSchema": S({"task_id": INT}, ["task_id"]),
 }
 RESTART = {
     "name": "restart_tracker",
@@ -62,6 +69,7 @@ TASK_TOOLS = [
         "inputSchema": S({"summary": STR, "report": STR}, ["summary", "report"]),
     },
     CREATE_TASK,
+    GET_TASK,
     RESTART,
     APPROVE,
 ]
@@ -73,16 +81,12 @@ CHAT_TOOLS = [
         "description": "Задачи проекта (по умолчанию текущего). column — фильтр по kind или имени колонки.",
         "inputSchema": S({"project_id": INT, "column": STR}),
     },
-    {
-        "name": "get_task",
-        "description": "Подробности задачи: описание, статус, итог, отчёт, последние события, вопросы.",
-        "inputSchema": S({"task_id": INT}, ["task_id"]),
-    },
+    GET_TASK,
     CREATE_TASK,
     {
         "name": "update_task",
-        "description": "Изменить заголовок/описание задачи.",
-        "inputSchema": S({"task_id": INT, "title": STR, "description": STR}, ["task_id"]),
+        "description": "Изменить заголовок/описание задачи. links — связать с задачами (id), unlink — убрать связи.",
+        "inputSchema": S({"task_id": INT, "title": STR, "description": STR, "links": IDS, "unlink": IDS}, ["task_id"]),
     },
     {
         "name": "move_task",

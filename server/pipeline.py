@@ -50,6 +50,12 @@ def changed(project_id=None):
     hub.send("changed", project_id=project_id)
 
 
+def changed_links(project_id, task_ids):
+    """Связь видна в обеих карточках: обновляем и проекты связанных задач."""
+    for pid in {project_id} | {t["project_id"] for t in map(db.get_task, task_ids) if t}:
+        changed(pid)
+
+
 def task_event(task_id, kind, text):
     eid = db.add_event(task_id, kind, text)
     hub.send("task_event", task_id=task_id, event={"id": eid, "ts": time.time(), "kind": kind, "text": text})
@@ -94,13 +100,42 @@ def git_line():
     return f"Git: {GIT_MODES.get(mode, GIT_MODES['commit_push'])}"
 
 
+STATUS_NAMES = {"idle": "не запускалась", "queued": "в очереди", "running": "выполняется", "resume": "продолжит",
+                "waiting": "ждёт ответа", "done": "готово", "error": "ошибка", "interrupted": "прервано"}
+
+
+def link_info(l):
+    """Связанная задача для промпта и get_task: путь к отчёту — только если файл есть."""
+    rp = l["report_path"] if l["report_path"] and Path(l["report_path"]).exists() else None
+    return {"id": l["id"], "title": l["title"], "column": l["column_name"], "status": l["status"],
+            "project_id": l["project_id"], "project": l["project_name"], "summary": l["summary"], "report_path": rp}
+
+
+def links_block(t, head="## Связанные задачи"):
+    """Раздел о связанных задачах для промпта; пусто, если связей нет."""
+    links = db.task_links(t["id"])
+    if not links:
+        return ""
+    p = (f"\n\n{head}\nПользователь связал их с этой задачей для контекста. Подробности — в отчётах "
+         "(прочитай через Read, если нужно) или через mcp__tracker__get_task.\n")
+    for l in map(link_info, links):
+        st = STATUS_NAMES.get(l["status"], l["status"])
+        where = l["column"] + (f", {st}" if st.casefold() != l["column"].casefold() else "")
+        if l["project_id"] != t["project_id"]:
+            where += f", проект «{l['project']}»"
+        summary = (l["summary"] or "пока нет").strip().rstrip(".")
+        p += f"- #{l['id']} «{l['title']}» — {where}. Итог: {summary}. "
+        p += f"Отчёт: {l['report_path']}\n" if l["report_path"] else "Отчёта нет.\n"
+    return p.rstrip()
+
+
 def task_prompt(t, project):
     p = f"# Задача #{t['id']}: {t['title']}\nПроект: {project['name']} ({project['path']})\n{git_line()}\n\n"
     p += (t["description"] or "(описания нет)").strip()
     comments = db.q("SELECT text FROM events WHERE task_id=? AND kind='comment' ORDER BY id", (t["id"],))
     if comments:
         p += "\n\n## Комментарии пользователя\n" + "\n".join(f"- {c['text']}" for c in comments)
-    return p
+    return p + links_block(t)
 
 
 def rerun_prompt(t):
@@ -110,6 +145,9 @@ def rerun_prompt(t):
                (t["id"], t["last_run_at"] or 0))
     if new:
         p += "\nНовые комментарии пользователя:\n" + "\n".join(f"- {c['text']}" for c in new)
+    links = links_block(t, "Связанные задачи (актуально):")
+    if links:
+        p += links + "\n"
     p += f"\n{git_line()}\nПродолжи работу с учётом этого и в конце снова вызови finish_task."
     return p
 
@@ -695,7 +733,7 @@ restart = Restart()
 # ---------------- обработчики MCP-инструментов ----------------
 def _task_brief(t):
     return {"id": t["id"], "title": t["title"], "column": t["column_name"], "status": t["status"],
-            "summary": t["summary"]}
+            "summary": t["summary"], "links": [l["id"] for l in db.task_links(t["id"])]}
 
 
 def _col(pid, name):
@@ -750,13 +788,20 @@ def _mcp(tool, a, tid, pid):
     if tool == "create_task":
         target = int(a.get("project_id") or pid)
         c = _col(target, a.get("column"))
+        links = [int(x) for x in a.get("links") or []]
+        for x in links:
+            if not db.get_task(x):
+                raise ValueError(f"Нет задачи #{x} для связи")
         new = db.create_task(target, a["title"], a.get("description", ""), c["id"])
+        for x in links:
+            db.link_tasks(new, x)
         if c["kind"] == "todo":
             db.update_task(new, status="queued")
         if tid:
             task_event(tid, "progress", f"Создана задача #{new}: {a['title']}")
-        changed(target)
-        return f"Создана задача #{new} в колонке «{c['name']}»"
+        changed_links(target, links)
+        return f"Создана задача #{new} в колонке «{c['name']}»" + (
+            ", связана с " + ", ".join(f"#{x}" for x in links) if links else "")
     if tool == "list_projects":
         return J(db.q("SELECT id, name, path, active FROM projects ORDER BY id"))
     if tool == "list_tasks":
@@ -775,12 +820,21 @@ def _mcp(tool, a, tid, pid):
             out["report"] = Path(t["report_path"]).read_text(encoding="utf-8")[:6000]
         out["events"] = [f"{e['kind']}: {e['text'][:300]}" for e in db.task_events(t["id"], limit=30)]
         out["questions"] = db.q("SELECT id, text, answer, status FROM questions WHERE task_id=?", (t["id"],))
+        out["links"] = [link_info(l) for l in db.task_links(t["id"])]
         return J(out)
     if tool == "update_task":
-        fields = {k: a[k] for k in ("title", "description") if a.get(k) is not None}
-        db.update_task(int(a["task_id"]), **fields)
-        changed(db.get_task(int(a["task_id"]))["project_id"])
-        return "Обновлено"
+        t = db.get_task(int(a["task_id"]))
+        if not t:
+            return "Нет такой задачи"
+        add, drop = [int(x) for x in a.get("links") or []], [int(x) for x in a.get("unlink") or []]
+        for x in add:
+            db.link_tasks(t["id"], x)
+        for x in drop:
+            db.unlink_tasks(t["id"], x)
+        db.update_task(t["id"], **{k: a[k] for k in ("title", "description") if a.get(k) is not None})
+        changed_links(t["project_id"], add + drop)
+        return "Обновлено" + (". Связи: " + (", ".join(f"#{l['id']}" for l in db.task_links(t["id"])) or "нет")
+                              if add or drop else "")
     if tool == "move_task":
         t = db.get_task(int(a["task_id"]))
         if t["id"] in orch.runs:

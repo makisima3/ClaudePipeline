@@ -137,7 +137,8 @@ def api_project_delete(h, body, query, pid):
 def api_board(h, body, query, pid):
     p = db.one("SELECT * FROM projects WHERE id=?", (pid,))
     need(p)
-    tasks = db.q("""SELECT t.*, (SELECT COUNT(*) FROM questions qu WHERE qu.task_id=t.id AND qu.status='open') AS open_q
+    tasks = db.q("""SELECT t.*, (SELECT COUNT(*) FROM questions qu WHERE qu.task_id=t.id AND qu.status='open') AS open_q,
+                           (SELECT COUNT(*) FROM task_links l WHERE l.task_id=t.id OR l.linked_id=t.id) AS links
                     FROM tasks t WHERE project_id=? ORDER BY position""", (pid,))
     return {"project": p, "columns": db.q("SELECT * FROM columns WHERE project_id=? ORDER BY position", (pid,)),
             "tasks": tasks}
@@ -200,7 +201,47 @@ def api_task(h, body, query, tid):
     t["questions"] = [db.get_question(r["id"]) for r in db.q("SELECT id FROM questions WHERE task_id=? ORDER BY id", (tid,))]
     t["running"] = tid in pl.orch.runs
     t["transcript"] = str(pl.transcript_path(t["project_path"], t["session_id"])) if t["session_id"] else None
+    t["links"] = [{k: l[k] for k in ("id", "title", "status", "column_name", "column_kind", "project_id", "project_name")}
+                  for l in db.task_links(tid)]
     return t
+
+
+@route("GET", "/api/tasks")
+def api_task_search(h, body, query):
+    """Поиск задач для связи: по номеру (#12 или 12) или части заголовка, во всех проектах."""
+    s = (query.get("q") or [""])[0].strip().lstrip("#").casefold()
+    skip = {int(x) for x in (query.get("exclude") or [""])[0].split(",") if x.isdigit()}
+    if not s:
+        return []
+    rows = db.q("""SELECT t.id, t.title, t.status, t.project_id, c.name AS column_name, p.name AS project_name
+                   FROM tasks t JOIN columns c ON c.id=t.column_id JOIN projects p ON p.id=t.project_id
+                   ORDER BY t.id DESC""")
+    hit = [r for r in rows if r["id"] not in skip and (str(r["id"]) == s or s in r["title"].casefold())]
+    hit.sort(key=lambda r: str(r["id"]) != s)  # точное совпадение номера — первым
+    return hit[:12]
+
+
+@route("POST", r"/api/tasks/(\d+)/links")
+def api_task_link(h, body, query, tid):
+    t = db.get_task(tid)
+    need(t)
+    other = db.get_task(int(body.get("task_id") or 0))
+    need(other, "Нет такой задачи", 400)
+    try:
+        db.link_tasks(tid, other["id"])
+    except ValueError as e:
+        raise HttpError(400, str(e))
+    pl.changed_links(t["project_id"], [other["id"]])
+    return {"ok": True}
+
+
+@route("DELETE", r"/api/tasks/(\d+)/links/(\d+)")
+def api_task_unlink(h, body, query, tid, other):
+    t = db.get_task(tid)
+    need(t)
+    db.unlink_tasks(tid, other)
+    pl.changed_links(t["project_id"], [other])
+    return {"ok": True}
 
 
 @route("PATCH", r"/api/tasks/(\d+)")
@@ -265,8 +306,9 @@ def api_task_delete(h, body, query, tid):
     t = db.get_task(tid)
     need(t)
     pl.orch.stop_task(tid)
-    db.ex("DELETE FROM tasks WHERE id=?", (tid,))
-    pl.changed(t["project_id"])
+    linked = [l["id"] for l in db.task_links(tid)]
+    db.ex("DELETE FROM tasks WHERE id=?", (tid,))  # связи удалит ON DELETE CASCADE
+    pl.changed_links(t["project_id"], linked)
     pl.hub.send("questions")
     return {"ok": True}
 

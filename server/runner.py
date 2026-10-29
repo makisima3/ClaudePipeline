@@ -157,6 +157,9 @@ class ClaudeRun:
 
     def _read(self):
         log = open(self.log_path, "a", encoding="utf-8") if self.log_path else None
+        if log:  # что ушло агенту на вход: в stream-json самого промпта нет
+            log.write(json.dumps({"type": "pipeline_prompt", "resume": self.resume, "prompt": self.prompt},
+                                 ensure_ascii=False) + "\n")
         stderr_chunks = []
         threading.Thread(target=lambda: stderr_chunks.append(self.proc.stderr.read()), daemon=True).start()
         try:

@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     role TEXT, text TEXT, ts REAL, attachments TEXT, chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS task_links (  -- связь двусторонняя, хранится одной строкой: task_id < linked_id
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    linked_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    created_at REAL, PRIMARY KEY (task_id, linked_id)
+);
+CREATE INDEX IF NOT EXISTS task_links_linked ON task_links(linked_id);
 """
 
 DEFAULT_SETTINGS = {
@@ -228,6 +234,32 @@ def add_event(task_id, kind, text):
 
 def task_events(task_id, after=0, limit=500):
     return q("SELECT * FROM events WHERE task_id=? AND id>? ORDER BY id DESC LIMIT ?", (task_id, after, limit))[::-1]
+
+
+# ---------- связанные задачи ----------
+def task_links(tid):
+    """Связанные задачи (в обе стороны) с колонкой и проектом."""
+    return q("""SELECT t.id, t.title, t.status, t.summary, t.report_path, t.project_id, c.name AS column_name,
+                       c.kind AS column_kind, p.name AS project_name
+                FROM task_links l JOIN tasks t ON t.id = CASE WHEN l.task_id=? THEN l.linked_id ELSE l.task_id END
+                JOIN columns c ON c.id=t.column_id JOIN projects p ON p.id=t.project_id
+                WHERE l.task_id=? OR l.linked_id=? ORDER BY t.id""", (tid, tid, tid))
+
+
+def link_tasks(a, b):
+    """Связать две задачи; повторная связь ничего не меняет. ValueError — нельзя."""
+    a, b = int(a), int(b)
+    if a == b:
+        raise ValueError("Нельзя связать задачу саму с собой")
+    for x in (a, b):
+        if not one("SELECT id FROM tasks WHERE id=?", (x,)):
+            raise ValueError(f"Нет задачи #{x}")
+    ex("INSERT OR IGNORE INTO task_links(task_id, linked_id, created_at) VALUES(?,?,?)", (min(a, b), max(a, b), now()))
+
+
+def unlink_tasks(a, b):
+    a, b = int(a), int(b)
+    ex("DELETE FROM task_links WHERE task_id=? AND linked_id=?", (min(a, b), max(a, b)))
 
 
 # ---------- questions ----------

@@ -194,6 +194,20 @@ header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; back
 .callout { padding: 10px 12px; border-radius: 8px; margin: 10px 0; font-size: 13px; }
 .callout.err { background: var(--err-soft); color: var(--err); white-space: pre-wrap; }
 .callout.ok { background: var(--ok-soft); }
+.links-n { font-size: 11px; }
+.refs { font-size: 12px; margin: 4px 4px 0; }
+.links { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.link-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.link-item a { color: var(--text); text-decoration: none; min-width: 0; overflow-wrap: anywhere; }
+.link-item a:hover { color: var(--accent); }
+.link-item button { padding: 2px 6px; opacity: .6; }
+.link-item button:hover { opacity: 1; }
+.link-add { position: relative; margin-top: 6px; }
+.link-res { position: absolute; left: 0; right: 0; top: 100%; z-index: 3; max-height: 260px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.18); padding: 4px; font-size: 13px; }
+.link-opt { padding: 6px 10px; border-radius: 6px; cursor: pointer; overflow-wrap: anywhere; }
+.link-opt:hover, .link-opt:first-child { background: var(--col); }
+a.tref { color: var(--accent); text-decoration: none; }
+a.tref:hover { text-decoration: underline; }
 .import-item { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 8px; display: grid; grid-template-columns: 22px 1fr; gap: 6px 8px; }
 .import-item input[type=checkbox] { width: auto; margin-top: 10px; }
 .import-item textarea { min-height: 60px; }
