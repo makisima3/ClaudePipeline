@@ -377,8 +377,14 @@ function renderSettings() {
         <div class="grow"><label>Effort для задач</label><select onchange="App.setSetting('effort', this.value)">${opts(EFFORTS, s.effort)}</select></div>
         <div class="grow"><label>Модель для чата и импорта</label><select onchange="App.setSetting('chat_model', this.value)">${opts(MODELS, s.chat_model)}</select></div>
       </div>
+      <label>Git в конце задачи (если папка проекта — git-репозиторий)</label>
+      <select onchange="App.setSetting('git_mode', this.value)">${opts([
+        ["commit_push", "Коммит и push — по коммиту на задачу, push без force"],
+        ["commit", "Только коммит — push делаю сам"],
+        ["off", "Ничего — агент git не трогает"]], s.git_mode)}</select>
+      <div class="hint">Агент коммитит только изменения своей задачи с сообщением «#id заголовок», чужие незакоммиченные правки не трогает. В папке самого трекера неотправленные коммиты блокируют его обновление с GitHub.</div>
       <label>Дополнительные указания всем агентам задач</label>
-      <textarea rows="4" placeholder="Например: «Не делай git commit», «Код Unity проверяй через UnityMCP»" onchange="App.setSetting('extra_prompt', this.value)">${esc(s.extra_prompt)}</textarea>
+      <textarea rows="4" placeholder="Например: «Код Unity проверяй через UnityMCP»" onchange="App.setSetting('extra_prompt', this.value)">${esc(s.extra_prompt)}</textarea>
       ${+s.pause_until * 1000 > Date.now() ? `<p>Сейчас пауза по лимиту. <button onclick="App.clearPause()">Снять паузу</button></p>` : ""}
     </div>
     <div class="section" id="upd-sec"></div>

@@ -68,6 +68,7 @@ DEFAULT_SETTINGS = {
     "extra_prompt": "",
     "pause_until": "0",
     "update_check_minutes": "60",     # проверка обновлений на GitHub, 0 — только вручную
+    "git_mode": "commit_push",        # off | commit | commit_push — что агент делает с git в конце задачи
 }
 
 # Системные колонки: kind -> имя по умолчанию
