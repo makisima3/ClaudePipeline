@@ -326,6 +326,13 @@ def api_chat_rename(h, body, query, cid):
     return pl.chat.info(db.get_chat(cid))
 
 
+@route("POST", r"/api/chats/(\d+)/title")
+def api_chat_retitle(h, body, query, cid):
+    get_chat(cid)
+    need(pl.chat.retitle(cid), "Claude в этом чате ещё не ответил — называть пока нечего", 400)
+    return pl.chat.info(db.get_chat(cid))
+
+
 @route("DELETE", r"/api/chats/(\d+)")
 def api_chat_delete(h, body, query, cid):
     get_chat(cid)
@@ -656,6 +663,7 @@ def main():
     pl.orch.recover()
     threading.Thread(target=pl.orch.loop, daemon=True).start()
     threading.Thread(target=updater.loop, daemon=True).start()
+    threading.Thread(target=pl.titler.loop, daemon=True).start()
     url = f"http://127.0.0.1:{PORT}"
     if after:
         pl.log_restart(f"новый экземпляр запущен (pid {os.getpid()}) после pid {after}")

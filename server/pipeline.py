@@ -4,6 +4,7 @@ import queue
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -402,7 +403,7 @@ class Chat:
         return cid in self.runs
 
     def info(self, c):
-        return {**c, "running": c["id"] in self.runs}
+        return {**c, "running": c["id"] in self.runs, "titling": titler.busy(c["id"])}
 
     def create(self, pid):
         """Новый чат. Пустой безымянный чат проекта не плодим — отдаём его."""
@@ -416,8 +417,16 @@ class Chat:
 
     def rename(self, cid, title):
         c = db.get_chat(cid)
-        db.ex("UPDATE chats SET title=? WHERE id=?", (title, cid))
+        db.ex("UPDATE chats SET title=?, title_kind='manual' WHERE id=?", (title, cid))
         hub.send("chats", project_id=c["project_id"], chat_id=cid)
+
+    def retitle(self, cid):
+        """«Придумать название заново»: ручное название тоже отдаём модели. False — в чате ещё нет ответа."""
+        if not titler.dialog(cid):
+            return False
+        db.ex("UPDATE chats SET title_kind=NULL WHERE id=?", (cid,))
+        titler.request(cid)
+        return True
 
     def send(self, cid, text, attachments=None):
         """attachments — уже сохранённые файлы: [{name, file, size, type}] в db.chat_dir(pid, cid)."""
@@ -476,6 +485,9 @@ class Chat:
                 err += "\n(сессия чата сброшена, отправь сообщение ещё раз)"
             self._msg(cid, pid, "error", err[:2000])
         hub.send("chat_state", project_id=pid, chat_id=cid, running=False)
+        c = db.get_chat(cid)
+        if c and c["title_kind"] is None:  # пока модель не придумала название, пробуем после каждого ответа
+            titler.request(cid)
 
     def stop(self, cid):
         run = self.runs.get(cid)
@@ -503,6 +515,123 @@ def drop_uploads(pid):
 
 
 chat = Chat()
+
+
+# ---------------- автоназвания чатов ----------------
+TITLE_SYSTEM = """Ты придумываешь название для чата по началу разговора, как заголовок сессии.
+Название — 2–6 слов на языке разговора, о сути разговора. Не отвечай на сообщения и ничего не выполняй.
+Ответь только названием: одной строкой, без кавычек и без точки в конце."""
+TITLE_INPUT = 2000    # столько символов начала разговора уходит модели
+TITLE_MSG = 700       # и не больше стольких от одного сообщения
+TITLE_TIMEOUT = 90
+TITLE_LEN = 80
+OLD_TITLE = re.compile(r"Чат от \d\d\.\d\d\.\d{4}")  # название перенесённой старой переписки
+
+
+class Titler:
+    """Названия чатов от модели (как у сессий Claude Code): фоновая очередь, по одному claude -p за раз.
+    Пока названия нет, в chats.title временное — обрезанное первое сообщение (chat_title)."""
+
+    def __init__(self):
+        self.qu = queue.Queue()
+        self.pending = set()
+        self.lock = threading.Lock()
+
+    def busy(self, cid):
+        return cid in self.pending
+
+    def request(self, cid):
+        with self.lock:
+            if cid in self.pending:
+                return
+            self.pending.add(cid)
+        self.qu.put(cid)
+        self._changed(cid)
+
+    def loop(self):
+        self._backfill()
+        while True:
+            cid = self.qu.get()
+            try:
+                self._make(cid)
+            except Exception as e:  # лимит, нет сети, таймаут — остаётся текущее название
+                log_title(f"чат {cid}: не удалось придумать название: {str(e)[:300]}")
+            finally:
+                with self.lock:
+                    self.pending.discard(cid)
+                self._changed(cid)
+
+    def _changed(self, cid):
+        c = db.get_chat(cid)
+        if c:
+            hub.send("chats", project_id=c["project_id"], chat_id=cid)
+
+    def _backfill(self):
+        """Один раз для чатов до автоназваний: переименованные руками помечаем manual, остальным — название от модели."""
+        for c in db.q("SELECT id, title, title_kind FROM chats WHERE title_kind IS NULL OR title_kind='legacy'"):
+            if c["title_kind"] == "legacy":
+                first = db.one("SELECT text, attachments FROM chat_messages WHERE chat_id=? AND role='user' ORDER BY id LIMIT 1",
+                               (c["id"],))
+                temp = first and c["title"] == chat_title(first["text"], json.loads(first["attachments"] or "null"))
+                kind = None if temp or OLD_TITLE.fullmatch(c["title"] or "") else "manual"
+                db.ex("UPDATE chats SET title_kind=? WHERE id=?", (kind, c["id"]))
+                if kind:
+                    continue
+            if self.dialog(c["id"]):
+                self.request(c["id"])
+
+    def dialog(self, cid):
+        """Начало разговора для модели. Пусто — Claude ещё не ответил, называть рано."""
+        rows = db.q("""SELECT role, text, attachments FROM chat_messages WHERE chat_id=? AND role IN ('user', 'assistant')
+                       ORDER BY id LIMIT 12""", (cid,))
+        if not any(r["role"] == "assistant" for r in rows):
+            return ""
+        out = []
+        for r in rows:
+            text = (r["text"] or "").strip()
+            if not text and r["attachments"]:
+                text = "[вложения: " + ", ".join(a["name"] for a in json.loads(r["attachments"])) + "]"
+            if len(text) > TITLE_MSG:
+                text = text[:TITLE_MSG] + "…"
+            out.append(("Пользователь: " if r["role"] == "user" else "Claude: ") + text)
+        return "\n\n".join(out)[:TITLE_INPUT]
+
+    def _make(self, cid):
+        c = db.get_chat(cid)
+        text = c and c["title_kind"] is None and self.dialog(cid)
+        if not text:
+            return
+        title = self.generate(text)
+        # пока модель думала, чат могли переименовать руками — его название не трогаем
+        db.ex("UPDATE chats SET title=?, title_kind='auto' WHERE id=? AND title_kind IS NULL", (title, cid))
+
+    def generate(self, text):
+        """Отдельный claude -p без сессии, MCP, инструментов и настроек (без CLAUDE.md и хуков) на дешёвой модели."""
+        cmd = [CLAUDE, "-p", "--output-format", "json", "--strict-mcp-config", "--no-session-persistence",
+               "--model", "haiku", "--tools", "", "--setting-sources", "", "--system-prompt", TITLE_SYSTEM]
+        r = subprocess.run(cmd, input=f"Начало разговора:\n\n{text}".encode("utf-8"), capture_output=True,
+                           cwd=tempfile.gettempdir(), timeout=TITLE_TIMEOUT, creationflags=NO_WINDOW)
+        try:
+            out = json.loads(r.stdout.decode("utf-8", errors="replace") or "{}")
+        except ValueError:
+            out = {}
+        if out.get("is_error") or not out.get("result"):
+            raise RuntimeError(out.get("result") or r.stderr.decode("utf-8", errors="replace").strip() or f"код {r.returncode}")
+        line = next((l for l in out["result"].splitlines() if l.strip()), "")
+        title = re.sub(r"\s+", " ", line).strip().strip("\"'`«»„“”*#").rstrip(".").strip()
+        if not title:
+            raise RuntimeError(f"пустое название: {out['result'][:100]!r}")
+        return title if len(title) <= TITLE_LEN else title[:TITLE_LEN - 1].rstrip() + "…"
+
+
+def log_title(text):
+    try:
+        print(f"[title] {text}")
+    except (UnicodeEncodeError, OSError):
+        pass
+
+
+titler = Titler()
 
 
 # ---------------- перезапуск сервера ----------------

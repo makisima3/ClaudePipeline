@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS questions (
 );
 CREATE TABLE IF NOT EXISTS chats (
     id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    title TEXT, session_id TEXT, created_at REAL, updated_at REAL
+    title TEXT, session_id TEXT, created_at REAL, updated_at REAL,
+    title_kind TEXT  -- NULL временное (из первого сообщения) | auto от модели | manual | legacy (до автоназваний)
 );
 CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -89,6 +90,9 @@ with _lock:
         _conn.execute("ALTER TABLE chat_messages ADD COLUMN attachments TEXT")
     if "chat_id" not in {r["name"] for r in _conn.execute("PRAGMA table_info(chat_messages)")}:
         _conn.execute("ALTER TABLE chat_messages ADD COLUMN chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE")
+    if "title_kind" not in {r["name"] for r in _conn.execute("PRAGMA table_info(chats)")}:
+        _conn.execute("ALTER TABLE chats ADD COLUMN title_kind TEXT")
+        _conn.execute("UPDATE chats SET title_kind='legacy' WHERE title IS NOT NULL")  # разберёт pipeline.Titler
     _conn.execute("CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id, id)")
 
 

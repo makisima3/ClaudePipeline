@@ -603,7 +603,8 @@ function renderChatHead() {
   if (!S.chatListOpen) return;
   list.innerHTML = S.chats.map(c => `<div class="chat-item ${c.id === S.chat.id ? "active" : ""}" onclick="App.openChat(${c.id})">
       <div class="grow"><div class="ci-title">${c.running ? '<span class="pulse"></span>' : ""}${esc(chatName(c))}</div>
-      <small>${c.running ? "отвечает · " : ""}${fmtTime(c.updated_at)} · сообщений: ${c.messages}</small></div>
+      <small>${c.running ? "отвечает · " : ""}${c.titling ? "придумываю название · " : ""}${fmtTime(c.updated_at)} · сообщений: ${c.messages}</small></div>
+      <button class="ghost" onclick="event.stopPropagation(); App.retitleChat(${c.id})" title="Придумать название заново" ${c.titling ? "disabled" : ""}>✨</button>
       <button class="ghost" onclick="event.stopPropagation(); App.renameChat(${c.id})" title="Переименовать">✎</button>
       <button class="ghost" onclick="event.stopPropagation(); App.deleteChat(${c.id})" title="Удалить чат">🗑</button></div>`).join("") ||
     `<div class="muted" style="padding:12px">Чатов пока нет — просто напиши сообщение.</div>`;
@@ -716,6 +717,11 @@ async function renameChat(id) {
   if (!title?.trim()) return;
   await api("PATCH", `/api/chats/${id}`, { title });
   loadChats();
+}
+
+async function retitleChat(id) {
+  await api("POST", `/api/chats/${id}/title`);
+  toast("Придумываю название…"); loadChats();
 }
 
 async function deleteChat(id) {
@@ -886,7 +892,7 @@ window.App = {
   newTask, createTask, openTask, saveTask, comment, toTodo, stopTask, resetTask, deleteTask, closeModal,
   answer, answerText, toggleAnswered, setSetting, clearPause, restartTracker, addColumn, columnMenu,
   checkUpdate, applyUpdate, toggleUpdList, hideUpdate,
-  importDialog, importParse, importCommit, toggleChat, chatSend, chatStop, chatNew, toggleChatList, openChat, renameChat, deleteChat, removeAtt, togglePipeline,
+  importDialog, importParse, importCommit, toggleChat, chatSend, chatStop, chatNew, toggleChatList, openChat, renameChat, retitleChat, deleteChat, removeAtt, togglePipeline,
 };
 
 (async () => {
