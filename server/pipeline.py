@@ -38,7 +38,7 @@ class Hub:
                 try:
                     qu.put_nowait(msg)
                 except queue.Full:
-                    pass
+                    qu.lost = True  # клиент не успевает читать: /api/events оборвёт поток, браузер переподключится и всё перечитает
 
 
 hub = Hub()

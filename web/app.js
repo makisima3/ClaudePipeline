@@ -40,16 +40,27 @@ const pill = st => STATUS[st] ? `<span class="pill ${STATUS[st][1]}">${st === "r
 const project = () => S.state?.projects.find(p => p.id === S.projectId);
 
 // ---------------- загрузка ----------------
+// Запросы одного вида не упорядочены: ответ, после которого ушёл более новый запрос, устарел и отбрасывается.
+const SEQ = {};
+const fresh = k => { const n = SEQ[k] = (SEQ[k] || 0) + 1; return () => SEQ[k] === n; };
+
 async function loadState() {
-  S.state = await api("GET", "/api/state");
+  const ok = fresh("state");
+  const st = await api("GET", "/api/state");
+  if (!ok()) return;
+  S.state = st;
   if (!project() && S.state.projects.length) S.projectId = S.state.projects[0].id;
   renderHeader();
 }
 
 async function loadBoard() {
+  const ok = fresh("board");
   if (!S.projectId) { S.board = null; return render(); }
-  S.board = await api("GET", `/api/projects/${S.projectId}/board`);
-  if (S.view === "board") renderBoard();
+  const b = await api("GET", `/api/projects/${S.projectId}/board`);
+  if (!ok()) return;
+  const same = S.board && JSON.stringify(b) === JSON.stringify(S.board);
+  S.board = b;
+  if (S.view === "board" && !same) renderBoard();  // без изменений не перерисовываем: не сбиваем перетаскивание
 }
 
 async function loadChat() {
@@ -197,7 +208,9 @@ async function createTask() {
 }
 
 async function openTask(id) {
+  const ok = fresh("task");
   const t = await api("GET", `/api/tasks/${id}`);
+  if (!ok()) return;
   S.task = t;
   modal(`
     <div class="row"><input class="title-input grow" id="tt-title" value="${esc(t.title)}"><span class="muted">#${t.id}</span></div>
@@ -251,10 +264,13 @@ async function saveTask() {
 
 async function refreshTask() {
   if (!S.task) return;
-  const t = await api("GET", `/api/tasks/${S.task.id}`).catch(() => null);
+  const ok = fresh("task"), id = S.task.id;
+  const t = await api("GET", `/api/tasks/${id}`).catch(() => null);
+  if (!ok() || S.task?.id !== id) return;
   if (!t) return closeModal();
-  if (!S.task) return;
-  S.task = t; renderTaskDyn();
+  const same = JSON.stringify({ ...t, events: 0 }) === JSON.stringify({ ...S.task, events: 0 });
+  S.task = t;
+  if (!same) renderTaskDyn();  // перерисовка стёрла бы набранный в карточке ответ
 }
 
 async function comment() {
@@ -290,8 +306,9 @@ function questionHtml(q, withTask = true) {
 }
 
 async function renderQuestions() {
+  const ok = fresh("questions");
   const list = await api("GET", `/api/questions?status=${S.showAnswered ? "all" : "open"}`);
-  if (S.view !== "questions") return;
+  if (!ok() || S.view !== "questions") return;
   $("#view").innerHTML = `<div class="pad">
     <div class="row"><h2 class="grow" style="margin:0">Вопросы агентов</h2>
       <label class="row" style="margin:0;color:var(--text)"><input type="checkbox" style="width:auto" ${S.showAnswered ? "checked" : ""} onchange="App.toggleAnswered(this.checked)"> показать закрытые</label></div>
@@ -550,41 +567,69 @@ const refreshState = debounce(() => loadState());
 const refreshTaskD = debounce(() => refreshTask(), 250);
 const refreshQuestions = debounce(() => { if (S.view === "questions") renderQuestions(); });
 
-function connect() {
-  const es = new EventSource("/api/events");
-  es.onmessage = e => {
-    const m = JSON.parse(e.data);
-    if (m.type === "changed") {
-      if (!m.project_id || m.project_id === S.projectId) refreshBoard();
-      if (!m.project_id) refreshState();
-      refreshTaskD(); refreshQuestions();
-    } else if (m.type === "state") {
-      S.state.pipeline = m.state; renderHeader(); refreshBoard();
-    } else if (m.type === "questions") {
-      refreshState(); refreshQuestions(); refreshTaskD();
-    } else if (m.type === "task_event") {
-      if (S.task && S.task.id === m.task_id) {
-        S.task.events.push(m.event);
-        const tl = $("#tt-tl");
-        if (tl) {
-          const atBottom = tl.scrollHeight - tl.scrollTop - tl.clientHeight < 60;
-          if (S.task.events.length === 1) tl.innerHTML = "";
-          tl.insertAdjacentHTML("beforeend", evHtml(m.event));
-          if (atBottom) tl.scrollTop = tl.scrollHeight;
-        }
+// сверка с сервером; full — ещё чат и вопросы (после переподключения, когда события могли потеряться)
+async function resync(full) {
+  await loadState().catch(() => { });
+  loadBoard().catch(() => { }); refreshTask();
+  if (full) { loadChat().catch(() => { }); refreshQuestions(); }
+}
+const resyncD = debounce(() => resync(), 300);
+
+function onEvent(m) {
+  if (m.type === "resync") {
+    resync(true);
+  } else if (m.type === "changed") {
+    if (!m.project_id || m.project_id === S.projectId) refreshBoard();
+    if (!m.project_id) refreshState();
+    refreshTaskD(); refreshQuestions();
+  } else if (m.type === "state") {
+    S.state.pipeline = m.state; renderHeader(); refreshBoard();
+  } else if (m.type === "questions") {
+    refreshState(); refreshQuestions(); refreshTaskD();
+  } else if (m.type === "task_event") {
+    if (S.task && S.task.id === m.task_id) {
+      S.task.events.push(m.event);
+      const tl = $("#tt-tl");
+      if (tl) {
+        const atBottom = tl.scrollHeight - tl.scrollTop - tl.clientHeight < 60;
+        if (S.task.events.length === 1) tl.innerHTML = "";
+        tl.insertAdjacentHTML("beforeend", evHtml(m.event));
+        if (atBottom) tl.scrollTop = tl.scrollHeight;
       }
-    } else if (m.type === "chat" && m.project_id === S.projectId) {
-      S.chat.messages.push(m.message); renderChat();
-    } else if (m.type === "chat_state" && m.project_id === S.projectId) {
-      S.chat.running = m.running; renderChat();
-    } else if (m.type === "chat_reset" && m.project_id === S.projectId) {
-      S.chat = { messages: [], running: false }; renderChat();
     }
-  };
-  es.onopen = () => { loadState().then(() => { loadBoard(); loadChat(); }); };
+  } else if (m.type === "chat" && m.project_id === S.projectId) {
+    S.chat.messages.push(m.message); renderChat();
+  } else if (m.type === "chat_state" && m.project_id === S.projectId) {
+    S.chat.running = m.running; renderChat();
+  } else if (m.type === "chat_reset" && m.project_id === S.projectId) {
+    S.chat = { messages: [], running: false }; renderChat();
+  }
 }
 
-function setView(v) { S.view = v; ls.set("view", v); render(); }
+// Одно SSE-соединение на все вкладки: по HTTP/1.1 браузер держит к хосту ~6 соединений, и вкладки, у каждой из
+// которых свой EventSource, быстро их съедают. Сервер слушает вкладка, взявшая Web Lock, остальным пересылает
+// события через BroadcastChannel. Закрылась она — замок переходит к следующей.
+function connect() {
+  const bc = window.BroadcastChannel && navigator.locks ? new BroadcastChannel("cp-events") : null;
+  const listen = () => {
+    const es = new EventSource("/api/events");
+    es.onmessage = e => { const m = JSON.parse(e.data); onEvent(m); bc?.postMessage(m); };
+    // после (пере)подключения перечитываем всё во всех вкладках: пока связи не было, события терялись
+    es.onopen = () => { resync(true); bc?.postMessage({ type: "resync" }); };
+    es.onerror = () => { if (es.readyState === EventSource.CLOSED) setTimeout(listen, 3000); };
+  };
+  if (!bc) return listen();
+  bc.onmessage = e => onEvent(e.data);
+  navigator.locks.request("cp-events", () => { listen(); return new Promise(() => { }); });
+}
+
+// подстраховка: видимая вкладка сверяется с сервером раз в 20 с и сразу, когда на неё вернулись
+setInterval(() => { if (document.visibilityState === "visible") resync(); }, 20000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") resyncD(); });
+window.addEventListener("focus", resyncD);
+
+// пока открыт другой вид, события доску не перечитывают — при возврате берём свежую
+function setView(v) { S.view = v; ls.set("view", v); render(); if (v === "board") loadBoard(); }
 function toggleAnswered(on) { S.showAnswered = on; renderQuestions(); }
 
 $("#chatInput").addEventListener("keydown", e => {
@@ -627,7 +672,7 @@ window.App = {
 (async () => {
   await loadState();
   render();
+  connect();  // подписываемся до загрузки доски и чата, чтобы не потерять события, пришедшие во время неё
   await loadBoard();
   if (S.chatOpen) loadChat();
-  connect();
 })();

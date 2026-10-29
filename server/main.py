@@ -476,7 +476,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(b": hi\n\n")
             self.wfile.flush()
-            while True:
+            while not getattr(qu, "lost", False):
                 try:
                     msg = qu.get(timeout=15)
                     self.wfile.write(f"data: {msg}\n\n".encode("utf-8"))
