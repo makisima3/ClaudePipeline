@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Отчёт по задаче</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  body { display: block; }
+  .report { max-width: 860px; margin: 0 auto; padding: 24px 16px 60px; }
+  .report .md { background: var(--panel); padding: 24px 28px; border-radius: 12px; box-shadow: var(--shadow); }
+</style>
+</head>
+<body>
+<div class="report">
+  <p><a href="/">← к трекеру</a></p>
+  <div class="md" id="r">Загрузка…</div>
+</div>
+<script src="/md.js"></script>
+<script>
+  const id = location.pathname.split("/").pop();
+  fetch(`/api/tasks/${id}/report`).then(r => r.json()).then(d => {
+    if (d.error) { document.getElementById("r").textContent = d.error; return; }
+    document.title = `Отчёт #${id}: ${d.title}`;
+    document.getElementById("r").innerHTML = md(d.markdown);
+  });
+</script>
+</body>
+</html>

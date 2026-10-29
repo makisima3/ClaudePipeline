@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClaudePipeline</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23c8642c'/><path d='M9 10h14M9 16h10M9 22h6' stroke='white' stroke-width='3' stroke-linecap='round'/></svg>">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="logo"><span class="mark">≡</span>ClaudePipeline</div>
+  <div class="projects" id="projects"></div>
+  <div class="nav">
+    <button class="ghost" data-view="board" onclick="App.setView('board')">Доска</button>
+    <button class="ghost" data-view="questions" onclick="App.setView('questions')">Вопросы <span id="qbadge"></span></button>
+    <button class="ghost" data-view="settings" onclick="App.setView('settings')">Настройки</button>
+    <button class="ghost" id="chatBtn" onclick="App.toggleChat()">Чат</button>
+  </div>
+  <div class="switch" title="Выполнение задач из колонки «В работу»">
+    <span class="state" id="pstate">…</span>
+    <button class="toggle" id="ptoggle" onclick="App.togglePipeline()" aria-label="Пайплайн"></button>
+  </div>
+</header>
+<div class="main">
+  <div class="view" id="view"></div>
+  <aside class="chat hidden" id="chat">
+    <div class="chat-head">
+      <b id="chatTitle">Чат</b>
+      <button class="ghost hidden" id="chatStop" onclick="App.chatStop()">Стоп</button>
+      <button class="ghost" onclick="App.chatReset()" title="Начать новую сессию чата">Новый</button>
+      <button class="ghost" onclick="App.toggleChat()">✕</button>
+    </div>
+    <div class="msgs" id="msgs"></div>
+    <div class="typing hidden" id="typing"><span class="spinner"></span> думаю…</div>
+    <div class="chat-input">
+      <div class="atts hidden" id="chatAtts"></div>
+      <div class="row">
+        <button class="ghost clip" onclick="$('#chatFile').click()" title="Прикрепить файлы (или перетащи их в чат, или вставь скриншот через Ctrl+V)">📎</button>
+        <textarea id="chatInput" class="grow" placeholder="Напиши, что сделать: «создай задачи по этому тексту…», «что с задачей 5?», «включи пайплайн». Enter — отправить, Shift+Enter — перенос. Скриншот — Ctrl+V, файлы — скрепкой или перетаскиванием"></textarea>
+      </div>
+      <input type="file" id="chatFile" multiple hidden>
+    </div>
+    <div class="drop-hint hidden" id="dropHint">Отпусти, чтобы прикрепить</div>
+  </aside>
+</div>
+<div id="modal"></div>
+<script src="/md.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

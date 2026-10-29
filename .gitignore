@@ -1,0 +1,20 @@
+# данные трекера: база, отчёты, логи сессий, MCP-конфиги, вложения чата
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# локальные настройки и секреты
+.claude/
+.env
+.env.*
+*.log
+
+# ОС и IDE
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.swp
