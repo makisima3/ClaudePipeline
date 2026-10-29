@@ -453,9 +453,12 @@ RESTART_TIMEOUT = 10 * 60  # дольше выполняющиеся запус�
 
 
 def log_restart(text):
-    print(f"[restart] {text}")
     with open(db.DATA / "restart.log", "a", encoding="utf-8") as f:
         f.write(f"{datetime.now():%d.%m.%Y %H:%M:%S} [{BOOT_ID[:8]}] {text}\n")
+    try:
+        print(f"[restart] {text}")
+    except (UnicodeEncodeError, OSError):  # консоль не в UTF-8 или её нет — в журнал уже записано
+        pass
 
 
 class Restart:

@@ -18,6 +18,7 @@ from urllib.parse import urlparse, parse_qs, quote
 import db
 import pipeline as pl
 from runner import PORT, NO_WINDOW
+from updater import updater
 
 WEB = db.ROOT / "web"
 ROUTES = []
@@ -51,6 +52,7 @@ def api_state(h, body, query):
         "boot_id": pl.BOOT_ID,
         "settings": db.get_settings(),
         "pipeline": pl.orch.state(),
+        "update": updater.state(),
         "projects": db.q("SELECT * FROM projects ORDER BY id"),
         "open_questions": db.one("SELECT COUNT(*) AS n FROM questions WHERE status='open'")["n"],
     }
@@ -68,6 +70,23 @@ def api_restart(h, body, query):
     return pl.orch.state()
 
 
+@route("GET", "/api/update")
+def api_update_state(h, body, query):
+    return updater.state()
+
+
+@route("POST", "/api/update/check")
+def api_update_check(h, body, query):
+    return updater.check()
+
+
+@route("POST", "/api/update")
+def api_update(h, body, query):
+    ok, msg = updater.update()
+    need(ok, msg, 409)
+    return {"message": msg, "update": updater.state(), "pipeline": pl.orch.state()}
+
+
 @route("POST", "/api/settings")
 def api_settings(h, body, query):
     for k, v in body.items():
@@ -75,6 +94,8 @@ def api_settings(h, body, query):
             db.set_setting(k, v)
     if body.get("clear_pause"):
         db.set_setting("pause_until", "0")
+    if "update_check_minutes" in body:
+        updater.wake.set()
     pl.hub.send("state", state=pl.orch.state())
     return db.get_settings()
 
@@ -608,6 +629,7 @@ def main():
         raise
     pl.orch.recover()
     threading.Thread(target=pl.orch.loop, daemon=True).start()
+    threading.Thread(target=updater.loop, daemon=True).start()
     url = f"http://127.0.0.1:{PORT}"
     if after:
         pl.log_restart(f"новый экземпляр запущен (pid {os.getpid()}) после pid {after}")

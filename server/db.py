@@ -62,6 +62,7 @@ DEFAULT_SETTINGS = {
     "chat_model": "",
     "extra_prompt": "",
     "pause_until": "0",
+    "update_check_minutes": "60",     # проверка обновлений на GitHub, 0 — только вручную
 }
 
 # Системные колонки: kind -> имя по умолчанию

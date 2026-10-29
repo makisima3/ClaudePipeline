@@ -93,6 +93,7 @@ function renderHeader() {
   $("#pstate").textContent = text;
   const p = project();
   $("#chatTitle").textContent = p ? `Чат · ${p.name}` : "Чат";
+  renderUpdate();
 }
 
 function render() {
@@ -355,6 +356,7 @@ function renderSettings() {
       <textarea rows="4" placeholder="Например: «Не делай git commit», «Код Unity проверяй через UnityMCP»" onchange="App.setSetting('extra_prompt', this.value)">${esc(s.extra_prompt)}</textarea>
       ${+s.pause_until * 1000 > Date.now() ? `<p>Сейчас пауза по лимиту. <button onclick="App.clearPause()">Снять паузу</button></p>` : ""}
     </div>
+    <div class="section" id="upd-sec"></div>
     <div class="section"><h3>Сервер трекера</h3>
       <div class="hint">Перезапуск нужен, чтобы вступили в силу изменения в коде трекера. Он дождётся, пока доработают выполняющиеся задачи и ответ чата
         (не дольше 10 минут, потом прервёт их — они продолжатся после старта), новые задачи до этого не берутся. Страница перезагрузится сама.</div>
@@ -370,6 +372,7 @@ function renderSettings() {
         <button class="primary" onclick="App.updateProject({name: $('#ps-name').value, path: $('#ps-path').value})">Сохранить</button></div>
     </div>` : ""}
   </div>`;
+  renderUpdateSection();
 }
 
 async function setSetting(k, v) { await api("POST", "/api/settings", { [k]: v }); await loadState(); toast("Сохранено"); }
@@ -380,6 +383,85 @@ async function restartTracker() {
   toast(S.state.pipeline.restart?.busy ? "Перезапущу, когда доработают текущие запуски" : "Перезапускаю…");
 }
 async function clearPause() { await api("POST", "/api/settings", { clear_pause: true }); await loadState(); renderSettings(); }
+
+// ---------------- обновления ----------------
+const plural = (n, one, few, many) => { const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 12 || b > 14) ? few : many; };
+const changesText = n => `${n} ${plural(n, "изменение", "изменения", "изменений")}`;
+const commitsHtml = u => `<ul class="commits">${u.commits.map(c => `<li><code>${esc(c.hash)}</code> ${esc(c.subject)}
+  <span class="muted">· ${esc(c.author)}, ${fmtTime(c.ts)}</span></li>`).join("")}${u.behind > u.commits.length ? `<li class="muted">… и ещё ${u.behind - u.commits.length}</li>` : ""}</ul>`;
+
+// плашка под шапкой: есть новая версия / обновляю / обновлено, ждём перезапуска
+function renderUpdate() {
+  const u = S.state?.update, r = S.state?.pipeline?.restart, bar = $("#updbar");
+  let html = "", cls = "";
+  if (u?.updated && (r || S.restarting)) {
+    cls = "ok"; html = `<span class="spinner"></span><b>Обновлено до ${esc(u.updated.to)}</b>
+      <span>перезапуск после завершения текущих задач…${r?.busy ? ` (ждёт: ${r.busy})` : ""}</span>`;
+  } else if (u?.updated?.broken) {
+    cls = "err"; html = `<b>Код обновлён до ${esc(u.updated.to)}, но не компилируется — перезапуск отменён, работает прежняя версия.</b>
+      <div class="full">${esc(u.updated.broken)}. Исправь ошибку (или откати: <code>git reset --hard ${esc(u.updated.from)}</code>) и перезапусти трекер.</div>`;
+  } else if (u?.updated) {
+    cls = "err"; html = `<b>Код обновлён до ${esc(u.updated.to)}, но трекер не перезапустился.</b><span class="grow"></span>
+      <button onclick="App.restartTracker()">Перезапустить</button>`;
+  } else if (u?.updating) {
+    html = `<span class="spinner"></span><b>Обновляю трекер…</b>`;
+  } else if (u?.behind > 0 && ls.get("updHidden", "") !== u.remote) {
+    html = `<b>Доступна новая версия (${changesText(u.behind)})</b>
+      <button class="ghost" onclick="App.toggleUpdList()">${S.updOpen ? "скрыть список ▴" : "что нового ▾"}</button>
+      <span class="grow"></span>
+      <button class="ghost" onclick="App.hideUpdate()" title="Не показывать до следующей новой версии">Позже</button>
+      <button class="primary" onclick="App.applyUpdate()">Обновить</button>
+      ${S.updOpen ? `<div class="full">${commitsHtml(u)}</div>` : ""}
+      ${u.update_error ? `<div class="full callout err">${esc(u.update_error)}</div>` : ""}`;
+  }
+  bar.className = `updbar ${cls} ${html ? "" : "hidden"}`;
+  bar.innerHTML = html;
+  if (S.view === "settings") renderUpdateSection();
+}
+
+function renderUpdateSection() {
+  const box = $("#upd-sec"), u = S.state.update;
+  if (!box || !u) return;
+  const s = S.state.settings;
+  let status;
+  if (u.checking) status = `<span class="spinner"></span> Проверяю…`;
+  else if (u.error) status = `<span class="err-text">${esc(u.error)}</span>`;
+  else if (!u.checked_at) status = `<span class="muted">Ещё не проверялось</span>`;
+  else if (u.behind) status = `<b>Доступна новая версия: ${changesText(u.behind)}</b>`;
+  else status = "Установлена последняя версия";
+  box.innerHTML = `<h3>Обновления</h3>
+    <div class="hint">Трекер сравнивает свою папку с веткой main на GitHub. «Обновить» делает <code>git pull --ff-only</code>
+      и перезапускает трекер, когда доработают текущие задачи. Если в папке есть незакоммиченные изменения или свои коммиты, обновление
+      откажет и объяснит, что сделать: локальная работа не теряется.</div>
+    <p>${status}</p>
+    ${u.head ? `<div class="hint">Версия: ветка <code>${esc(u.branch)}</code>, коммит <code>${esc(u.head)}</code>${u.remote ? `, на GitHub — <code>${esc(u.remote)}</code>` : ""}${u.ahead ? ` · локальных коммитов, которых нет на GitHub: ${u.ahead}` : ""}${u.checked_at ? ` · проверено ${fmtTime(u.checked_at)}` : ""}</div>` : ""}
+    ${u.behind && u.commits.length ? commitsHtml(u) : ""}
+    ${u.update_error ? `<div class="callout err">${esc(u.update_error)}</div>` : ""}
+    <label>Проверять раз в, минут (0 — только вручную)</label>
+    <div class="row"><input type="number" min="0" value="${esc(s.update_check_minutes)}" style="width:120px" onchange="App.setSetting('update_check_minutes', Math.max(0, +this.value || 0))">
+      <button onclick="App.checkUpdate()" ${u.checking || u.updating ? "disabled" : ""}>Проверить обновления</button>
+      ${u.behind && !u.updated ? `<button class="primary" onclick="App.applyUpdate()" ${u.updating ? "disabled" : ""}>Обновить</button>` : ""}</div>`;
+}
+
+async function checkUpdate() {
+  S.state.update = { ...S.state.update, checking: true }; renderUpdate();
+  S.state.update = await api("POST", "/api/update/check").catch(() => S.state.update);
+  renderUpdate();
+  const u = S.state.update;
+  toast(u.error ? "Не удалось проверить обновления" : u.behind ? `Доступна новая версия: ${changesText(u.behind)}` : "Установлена последняя версия");
+}
+
+async function applyUpdate() {
+  if (!confirm("Обновить трекер? Новая версия скачается сразу, а перезапуск будет, когда доработают текущие задачи и ответ чата. Страница перезагрузится сама.")) return;
+  S.updOpen = false;
+  const r = await api("POST", "/api/update").catch(() => null);
+  if (!r) return;
+  S.state.update = r.update; S.state.pipeline = r.pipeline;
+  renderHeader(); toast(r.message);
+}
+
+function toggleUpdList() { S.updOpen = !S.updOpen; renderUpdate(); }
+function hideUpdate() { ls.set("updHidden", S.state.update.remote); renderUpdate(); }
 
 // ---------------- проекты ----------------
 function newProject() {
@@ -624,6 +706,8 @@ function onEvent(m) {
     S.state.pipeline = m.state; renderHeader(); refreshBoard();
     if (S.restarting && !m.state.restart) { S.restarting = false; setOffline(false); }  // перезапуск не удался, работаем дальше
     if (S.view === "settings" && wasRestart !== !!m.state.restart) renderSettings();
+  } else if (m.type === "update") {
+    if (S.state) { S.state.update = m.update; renderUpdate(); }
   } else if (m.type === "questions") {
     refreshState(); refreshQuestions(); refreshTaskD();
   } else if (m.type === "task_event") {
@@ -709,6 +793,7 @@ window.App = {
   setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
   newTask, createTask, openTask, saveTask, comment, toTodo, stopTask, resetTask, deleteTask, closeModal,
   answer, answerText, toggleAnswered, setSetting, clearPause, restartTracker, addColumn, columnMenu,
+  checkUpdate, applyUpdate, toggleUpdList, hideUpdate,
   importDialog, importParse, importCommit, toggleChat, chatSend, chatStop, chatReset, removeAtt, togglePipeline,
 };
 

@@ -77,6 +77,15 @@ header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; back
 .toggle.on::after { left: 23px; }
 .toggle.stopping { background: var(--warn); }
 
+.updbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 16px; background: var(--accent-soft); border-bottom: 1px solid var(--line); font-size: 13px; }
+.updbar.ok { background: var(--ok-soft); }
+.updbar.err { background: var(--err-soft); color: var(--err); }
+.updbar button { padding: 3px 10px; }
+.updbar .full { flex-basis: 100%; margin: 0 0 4px; }
+.commits { margin: 6px 0; padding-left: 18px; max-height: 240px; overflow-y: auto; font-size: 13px; }
+.commits li { margin: 2px 0; overflow-wrap: anywhere; }
+.err-text { color: var(--err); }
+
 /* ---------- layout ---------- */
 .main { flex: 1; display: flex; min-height: 0; }
 .view { flex: 1; overflow: auto; min-width: 0; }
