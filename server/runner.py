@@ -14,6 +14,7 @@ CLAUDE = shutil.which("claude") or "claude"
 PORT = int(os.environ.get("PIPELINE_PORT", "8765"))
 SERVER_URL = f"http://127.0.0.1:{PORT}"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+EXIT_GRACE = 5  # сек после result: не вышел сам — значит ждёт свои фоновые задачи, гасим
 
 
 def short_tool(name, inp):
@@ -29,7 +30,8 @@ def short_tool(name, inp):
 
 class ClaudeRun:
     """Один запуск сессии. Колбэки вызываются из фонового потока:
-    on_text(str), on_tool(name, input), on_rate_limit(info), on_done(result_dict)."""
+    on_text(str), on_tool(name, input), on_rate_limit(info), on_done(result_dict).
+    on_done вызывается ровно один раз; killed — остановлен через kill(), reaped — погашен после конца хода."""
 
     def __init__(self, *, key, cwd, prompt, session_id, resume, role, system_prompt,
                  task_id=None, project_id=None, model=None, effort=None, permission_mode="bypassPermissions",
@@ -54,7 +56,12 @@ class ClaudeRun:
         self.on_done = on_done or (lambda r: None)
         self.proc = None
         self.killed = False
+        self.reaped = False
         self.rate_limited = None
+        self.result = None
+        self._timer = None
+        self._finished = False
+        self._lock = threading.Lock()
 
     def _mcp_config(self):
         cfg_dir = DATA / "runs" / "mcp"
@@ -104,6 +111,9 @@ class ClaudeRun:
 
     def kill(self):
         self.killed = True
+        self._kill_tree()
+
+    def _kill_tree(self):
         if self.proc and self.proc.poll() is None:
             if os.name == "nt":
                 subprocess.run(["taskkill", "/PID", str(self.proc.pid), "/T", "/F"],
@@ -111,8 +121,41 @@ class ClaudeRun:
             else:
                 self.proc.kill()
 
+    def _arm(self):
+        """Ход закончен: ждём нормального выхода EXIT_GRACE секунд."""
+        if self._timer:
+            self._timer.cancel()
+        self._timer = threading.Timer(EXIT_GRACE, self._reap)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _reap(self):
+        """claude -p не выходит, пока живут его фоновые задачи (серверы, watch), и сам начинает
+        по ним новые ходы. Ход уже закончен и результат есть — гасим всё дерево."""
+        if self._finished:
+            return
+        if self.proc.poll() is None:
+            self.reaped = True
+            self._kill_tree()
+        # если stdout унаследовал кто-то вне дерева, EOF не придёт — не ждём его вечно
+        t = threading.Timer(EXIT_GRACE, self._finish)
+        t.daemon = True
+        t.start()
+
+    def _finish(self):
+        with self._lock:
+            if self._finished:
+                return
+            self._finished = True
+        if self._timer:
+            self._timer.cancel()
+        result = dict(self.result)
+        result["killed"] = self.killed
+        result["reaped"] = self.reaped
+        result["rate_limited"] = self.rate_limited
+        self.on_done(result)
+
     def _read(self):
-        result = None
         log = open(self.log_path, "a", encoding="utf-8") if self.log_path else None
         stderr_chunks = []
         threading.Thread(target=lambda: stderr_chunks.append(self.proc.stderr.read()), daemon=True).start()
@@ -129,19 +172,17 @@ class ClaudeRun:
                 except ValueError:
                     continue
                 try:
-                    result = self._handle(ev) or result
+                    self.result = self._handle(ev) or self.result
                 except Exception as e:  # колбэки не должны ронять чтение
                     print(f"[runner] callback error: {e}", file=sys.stderr)
         finally:
             self.proc.wait()
             if log:
                 log.close()
-        if result is None:
+        if self.result is None:
             err = b"".join(c for c in stderr_chunks if c).decode("utf-8", errors="replace").strip()
-            result = {"is_error": True, "result": err or f"Процесс завершился с кодом {self.proc.returncode}"}
-        result["killed"] = self.killed
-        result["rate_limited"] = self.rate_limited
-        self.on_done(result)
+            self.result = {"is_error": True, "result": err or f"Процесс завершился с кодом {self.proc.returncode}"}
+        self._finish()
 
     def _handle(self, ev):
         t = ev.get("type")
@@ -156,6 +197,10 @@ class ClaudeRun:
             if info.get("status") == "rejected":
                 self.rate_limited = info
                 self.on_rate_limit(info)
+        elif t == "system" and ev.get("subtype") == "init" and self._timer:
+            self._timer.cancel()  # фоновая задача завершилась, и claude успел начать новый ход — даём доделать
+            self._timer = None
         elif t == "result":
+            self._arm()
             return ev
         return None

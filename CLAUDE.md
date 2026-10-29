@@ -13,7 +13,7 @@
   - `Chat`/`chat` — сессия чата на проект;
   - `mcp_call`/`_mcp` — обработчики всех MCP-инструментов;
   - `import_parse` — разбор текста в задачи через `claude -p --json-schema`.
-- `server/runner.py` — `ClaudeRun`: собирает команду `claude -p --output-format stream-json`, пишет MCP-конфиг в `data/runs/mcp/<key>.json`, читает stream-json в фоновом потоке и зовёт колбэки `on_text/on_tool/on_rate_limit/on_done`. Здесь же `PORT` из `PIPELINE_PORT`.
+- `server/runner.py` — `ClaudeRun`: собирает команду `claude -p --output-format stream-json`, пишет MCP-конфиг в `data/runs/mcp/<key>.json`, читает stream-json в фоновом потоке и зовёт колбэки `on_text/on_tool/on_rate_limit/on_done` (`on_done` ровно один раз). `claude -p` не выходит, пока живы его фоновые Bash/PowerShell-задачи, и по их завершении сам начинает новый ход, поэтому после `result` даётся `EXIT_GRACE` секунд на выход (новый `system/init` сбрасывает отсчёт), потом дерево гасится `_kill_tree()` (`taskkill /T /F`), а в `on_done` уходит последний result с `reaped=True`. `killed=True` — только ручной `kill()`. Здесь же `PORT` из `PIPELINE_PORT`.
 - `server/mcp_tracker.py` — stdio MCP-сервер, который запускает сам Claude Code. Тонкая прослойка: набор инструментов зависит от роли (`TASK_TOOLS` для `task`, `CHAT_TOOLS` для `chat`), каждый вызов уходит в `POST /api/mcp/call`. Исключение — `approve`: он сам опрашивает `approve_status`, пока пользователь не ответит.
 - `server/db.py` — SQLite `data/tracker.db` (WAL, один connection под `RLock`). Хелперы `q/one/ex`, схема в `SCHEMA`, настройки по умолчанию в `DEFAULT_SETTINGS`, системные колонки в `SYSTEM_COLUMNS`.
 - `web/` — чистые HTML/CSS/JS без сборки и фреймворков: `index.html` + `app.js` (вся SPA), `md.js` (свой рендер markdown), `report.html` (страница отчёта), `style.css`.
@@ -33,7 +33,8 @@
 2. `orch.tick()` берёт её (сначала `resume`, потом `todo` по позиции) → `start_task` переносит в `progress`, `status='running'`, создаёт `ClaudeRun` с `cwd` = папка проекта (отсюда же подхватывается этот CLAUDE.md).
 3. `runner` запускает `claude -p` с `--mcp-config` → Claude Code поднимает `mcp_tracker.py` с env `PIPELINE_URL/ROLE/TASK_ID/PROJECT_ID`.
 4. Вызовы `mcp__tracker__*` → `POST /api/mcp/call` → `pipeline._mcp`. `ask_user` переводит задачу в `waiting`; ответ пользователя → `status='resume'` → продолжение через `--resume <session_id>`. `finish_task` пишет отчёт и переносит в `done`.
-5. Изменения уходят в браузер через `GET /api/events` (SSE), клиент перечитывает нужные данные.
+5. Пока `_done` разбирает итог хода, задача остаётся в `orch.runs` (всё под `orch.lock`, как и `answer_question`), так что продолжение после ответа стартует только когда прошлый процесс завершён (самое позднее через `EXIT_GRACE` после `result`).
+6. Изменения уходят в браузер через `GET /api/events` (SSE), клиент перечитывает нужные данные.
 
 Где что лежит (`data/` в `.gitignore`):
 - `data/tracker.db` — база;

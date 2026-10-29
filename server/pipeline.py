@@ -61,6 +61,7 @@ TASK_SYSTEM = """Ты — исполнитель задач в личном па
 - Если без решения пользователя дальше никак (выбор варианта, нехватка данных, рискованное действие) — вызови mcp__tracker__ask_user и СРАЗУ заверши ход одной короткой фразой. Ответ придёт следующим сообщением в этой же сессии.
 - Крупные подзадачи и исследования отдавай подагентам (инструмент Agent), чтобы не перегружать свой контекст.
 - По ходу работы можешь отмечать прогресс через mcp__tracker__report_progress.
+- Фоновые процессы, которые ты запускал (серверы, watch, установщики), останавливай перед ask_user и finish_task: после конца хода пайплайн всё равно погасит их вместе с твоим процессом. Боевой сервер трекера не трогай.
 - Если по ходу нашлась отдельная работа вне рамок задачи — создай её через mcp__tracker__create_task (в бэклог), а не делай молча.
 - В конце ОБЯЗАТЕЛЬНО вызови mcp__tracker__finish_task: summary — 1-3 предложения, report — подробный markdown (что сделано и как, изменённые файлы, как проверить, принятые решения, открытые вопросы).
 - Пиши по-русски."""
@@ -231,8 +232,15 @@ class Orchestrator:
         hub.send("state", state=self.state())
 
     def _done(self, tid, r):
+        # задача остаётся в runs, пока итог не разобран: иначе tick() успеет стартовать продолжение раньше
         with self.lock:
-            self.runs.pop(tid, None)
+            try:
+                self._finish_run(tid, r)
+            finally:
+                self.runs.pop(tid, None)
+        hub.send("state", state=self.state())
+
+    def _finish_run(self, tid, r):
         t = db.get_task(tid)
         if not t:
             return
@@ -267,8 +275,9 @@ class Orchestrator:
             # Агент не вызвал finish_task — берём финальный ответ как отчёт
             text = str(r.get("result") or "").strip() or "(агент не оставил отчёта)"
             finish_task(tid, text[:400], text)
+        if r.get("reaped"):
+            task_event(tid, "system", "Ход закончен, но процесс ждал фоновые задачи — остановлен вместе с ними")
         changed(t["project_id"])
-        hub.send("state", state=self.state())
 
     def stop_task(self, tid):
         with self.lock:
@@ -308,6 +317,11 @@ def finish_task(tid, summary, report):
 
 
 def answer_question(qid, answer):
+    with orch.lock:  # не пересекаться с разбором итога хода в orch._done
+        return _answer_question(qid, answer)
+
+
+def _answer_question(qid, answer):
     qu = db.get_question(qid)
     if not qu or qu["status"] != "open":
         return False
