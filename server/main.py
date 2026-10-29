@@ -3,6 +3,7 @@ import base64
 import binascii
 import json
 import mimetypes
+import os
 import queue
 import re
 import subprocess
@@ -47,6 +48,7 @@ def need(cond, msg="Не найдено", code=404):
 @route("GET", "/api/state")
 def api_state(h, body, query):
     return {
+        "boot_id": pl.BOOT_ID,
         "settings": db.get_settings(),
         "pipeline": pl.orch.state(),
         "projects": db.q("SELECT * FROM projects ORDER BY id"),
@@ -57,6 +59,12 @@ def api_state(h, body, query):
 @route("POST", "/api/pipeline")
 def api_pipeline(h, body, query):
     pl.orch.set_enabled(bool(body.get("enabled")))
+    return pl.orch.state()
+
+
+@route("POST", "/api/restart")
+def api_restart(h, body, query):
+    pl.restart.request("кнопка в настройках")
     return pl.orch.state()
 
 
@@ -334,6 +342,7 @@ def api_chat_send(h, body, query, pid):
     items = body.get("attachments") or []
     need(text or items, "Пустое сообщение", 400)
     need(not pl.chat.running(pid), "Я ещё отвечаю на прошлое сообщение", 409)
+    need(not pl.restart.since, "Трекер перезапускается — отправь сообщение через минуту", 409)
     attachments = save_uploads(pid, items) if items else None
     need(pl.chat.send(pid, text, attachments), "Я ещё отвечаю на прошлое сообщение", 409)
     return {"ok": True}
@@ -474,7 +483,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         qu = pl.hub.subscribe()
         try:
-            self.wfile.write(b": hi\n\n")
+            hello = json.dumps({"type": "hello", "boot_id": pl.BOOT_ID})
+            self.wfile.write(f"retry: 2000\ndata: {hello}\n\n".encode("utf-8"))
             self.wfile.flush()
             while not getattr(qu, "lost", False):
                 try:
@@ -533,17 +543,88 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch("DELETE")
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    # SO_REUSEADDR в Windows позволяет второму процессу занять уже слушаемый порт — там он не нужен
+    allow_reuse_address = os.name != "nt"
+
+
+def spawn_successor():
+    """Новый экземпляр сервера в своём окне консоли, как из start.cmd. Он дождётся выхода этого процесса."""
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--no-browser", "--after", str(os.getpid())]
+    if os.name != "nt":
+        return subprocess.Popen(cmd, cwd=db.ROOT, start_new_session=True)
+    si = subprocess.STARTUPINFO()
+    si.dwFlags, si.wShowWindow = subprocess.STARTF_USESHOWWINDOW, 7  # SW_SHOWMINNOACTIVE: свёрнуто, фокус не отнимает
+    flags = subprocess.CREATE_NEW_CONSOLE
+    try:  # выйти из job-объекта родителя, если он разрешает: иначе новый экземпляр могут погасить вместе со старым
+        return subprocess.Popen(cmd, cwd=db.ROOT, startupinfo=si, creationflags=flags | 0x01000000)  # CREATE_BREAKAWAY_FROM_JOB
+    except OSError:
+        return subprocess.Popen(cmd, cwd=db.ROOT, startupinfo=si, creationflags=flags)
+
+
+def wait_exit(pid, timeout):
+    """Ждать завершения процесса pid (старого экземпляра при перезапуске)."""
+    if os.name == "nt":
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if h:
+            k.WaitForSingleObject(h, int(timeout * 1000))
+            k.CloseHandle(h)
+        return
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.3)
+
+
+def bind(after):
+    """При перезапуске сначала ждём выхода старого экземпляра, потом до 30 с — освобождения порта."""
+    if after:
+        wait_exit(after, 60)
+    for i in range(60 if after else 1):
+        try:
+            return Server(("127.0.0.1", PORT), Handler)
+        except OSError:
+            if not after or i == 59:
+                raise
+            time.sleep(0.5)
+
+
 def main():
+    after = int(sys.argv[sys.argv.index("--after") + 1]) if "--after" in sys.argv else None
+    if os.name == "nt":
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW("ClaudePipeline")
+    try:
+        srv = bind(after)
+    except OSError as e:
+        if after:
+            pl.log_restart(f"новый экземпляр не смог занять порт {PORT}: {e}")
+        raise
     pl.orch.recover()
     threading.Thread(target=pl.orch.loop, daemon=True).start()
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    srv.daemon_threads = True
     url = f"http://127.0.0.1:{PORT}"
+    if after:
+        pl.log_restart(f"новый экземпляр запущен (pid {os.getpid()}) после pid {after}")
     print(f"ClaudePipeline запущен: {url}  (Ctrl+C — остановить)")
     if "--no-browser" not in sys.argv:
         webbrowser.open(url)
+
+    def restart_exit():
+        p = spawn_successor()
+        pl.log_restart(f"запущен новый экземпляр (pid {p.pid}), этот завершается")
+        srv.shutdown()  # serve_forever в главном потоке вернётся, процесс выйдет
+
+    pl.restart.exit = restart_exit
     try:
         srv.serve_forever()
+        srv.server_close()
+        os._exit(0)  # не ждать потоков SSE и чтения
     except KeyboardInterrupt:
         print("Останавливаю...")
         for run in list(pl.orch.runs.values()):

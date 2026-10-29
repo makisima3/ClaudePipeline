@@ -33,6 +33,13 @@ CREATE_TASK = {
                    "project_id — если не текущий проект.",
     "inputSchema": S({"title": STR, "description": STR, "column": STR, "project_id": INT}, ["title"]),
 }
+RESTART = {
+    "name": "restart_tracker",
+    "description": "Перезапустить сервер трекера, чтобы вступили в силу изменения в его коде (server/). Перезапуск "
+                   "отложенный: трекер дождётся завершения всех запусков агентов и чата, включая твой, и новых "
+                   "задач до этого не возьмёт. После вызова заверши ход.",
+    "inputSchema": S({}),
+}
 
 TASK_TOOLS = [
     {
@@ -55,6 +62,7 @@ TASK_TOOLS = [
         "inputSchema": S({"summary": STR, "report": STR}, ["summary", "report"]),
     },
     CREATE_TASK,
+    RESTART,
     APPROVE,
 ]
 
@@ -93,6 +101,7 @@ CHAT_TOOLS = [
         "description": "Включить/выключить выполнение задач (только по просьбе пользователя).",
         "inputSchema": S({"enabled": {"type": "boolean"}}, ["enabled"]),
     },
+    RESTART,
     APPROVE,
 ]
 

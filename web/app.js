@@ -48,6 +48,7 @@ async function loadState() {
   const ok = fresh("state");
   const st = await api("GET", "/api/state");
   if (!ok()) return;
+  if (bootChanged(st.boot_id)) return;
   S.state = st;
   if (!project() && S.state.projects.length) S.projectId = S.state.projects[0].id;
   renderHeader();
@@ -83,7 +84,8 @@ function renderHeader() {
   tg.classList.toggle("on", pl.enabled === "1");
   tg.classList.toggle("stopping", pl.enabled === "stopping");
   let text = "Выключен";
-  if (pl.enabled === "stopping") text = `Доделывает (${pl.running.length}) и выключится`;
+  if (pl.restart) text = `Перезапуск трекера${pl.restart.busy ? ` · ждёт завершения: ${pl.restart.busy}` : "…"}`;
+  else if (pl.enabled === "stopping") text = `Доделывает (${pl.running.length}) и выключится`;
   else if (pl.enabled === "1") {
     if (pl.pause_until * 1000 > Date.now()) text = `Пауза по лимиту до ${new Date(pl.pause_until * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}`;
     else text = pl.running.length ? `Работает · задач: ${pl.running.length}` : "Включён · ждёт задач";
@@ -353,6 +355,13 @@ function renderSettings() {
       <textarea rows="4" placeholder="Например: «Не делай git commit», «Код Unity проверяй через UnityMCP»" onchange="App.setSetting('extra_prompt', this.value)">${esc(s.extra_prompt)}</textarea>
       ${+s.pause_until * 1000 > Date.now() ? `<p>Сейчас пауза по лимиту. <button onclick="App.clearPause()">Снять паузу</button></p>` : ""}
     </div>
+    <div class="section"><h3>Сервер трекера</h3>
+      <div class="hint">Перезапуск нужен, чтобы вступили в силу изменения в коде трекера. Он дождётся, пока доработают выполняющиеся задачи и ответ чата
+        (не дольше 10 минут, потом прервёт их — они продолжатся после старта), новые задачи до этого не берутся. Страница перезагрузится сама.</div>
+      <p>${S.state.pipeline.restart
+        ? `<span class="muted">Перезапуск запрошен${S.state.pipeline.restart.busy ? `, ждёт завершения запусков: ${S.state.pipeline.restart.busy}` : "…"}</span>`
+        : `<button onclick="App.restartTracker()">Перезапустить трекер</button>`}</p>
+    </div>
     ${p ? `<div class="section"><h3>Проект «${esc(p.name)}»</h3>
       <label>Название</label><input id="ps-name" value="${esc(p.name)}">
       <label>Папка</label><div class="row"><input id="ps-path" value="${esc(p.path)}"><button onclick="App.pickFolder('#ps-path')">Обзор…</button></div>
@@ -364,6 +373,12 @@ function renderSettings() {
 }
 
 async function setSetting(k, v) { await api("POST", "/api/settings", { [k]: v }); await loadState(); toast("Сохранено"); }
+async function restartTracker() {
+  if (!confirm("Перезапустить трекер? Он дождётся завершения выполняющихся задач и ответа чата (не дольше 10 минут), потом перезапустится, а страница перезагрузится.")) return;
+  S.state.pipeline = await api("POST", "/api/restart");
+  renderHeader(); if (S.view === "settings") renderSettings();
+  toast(S.state.pipeline.restart?.busy ? "Перезапущу, когда доработают текущие запуски" : "Перезапускаю…");
+}
 async function clearPause() { await api("POST", "/api/settings", { clear_pause: true }); await loadState(); renderSettings(); }
 
 // ---------------- проекты ----------------
@@ -561,6 +576,22 @@ async function togglePipeline() {
   if (!turnOn) toast(S.state.settings.stop_mode === "immediate" ? "Пайплайн остановлен" : "Доделаю текущие задачи и выключусь");
 }
 
+// ---------------- перезапуск сервера ----------------
+// boot_id меняется при каждом старте сервера: другой — значит, трекер перезапустился и, возможно, обновился
+function bootChanged(id) {
+  if (!id) return false;
+  if (!S.bootId) S.bootId = id;
+  if (id === S.bootId) return false;
+  location.reload();
+  return true;
+}
+
+function setOffline(on) {
+  const el = $("#offline");
+  el.textContent = S.restarting || S.state?.pipeline?.restart ? "Трекер перезапускается…" : "Нет связи с трекером, переподключаюсь…";
+  el.classList.toggle("hidden", !on);
+}
+
 // ---------------- события сервера ----------------
 const refreshBoard = debounce(() => { if (S.view === "board") loadBoard(); });
 const refreshState = debounce(() => loadState());
@@ -577,13 +608,22 @@ const resyncD = debounce(() => resync(), 300);
 
 function onEvent(m) {
   if (m.type === "resync") {
-    resync(true);
+    setOffline(false); resync(true);
+  } else if (m.type === "hello") {
+    bootChanged(m.boot_id);
+  } else if (m.type === "restarting") {
+    S.restarting = true; setOffline(true);
+  } else if (m.type === "offline") {
+    setOffline(true);
   } else if (m.type === "changed") {
     if (!m.project_id || m.project_id === S.projectId) refreshBoard();
     if (!m.project_id) refreshState();
     refreshTaskD(); refreshQuestions();
   } else if (m.type === "state") {
+    const wasRestart = !!S.state.pipeline.restart;
     S.state.pipeline = m.state; renderHeader(); refreshBoard();
+    if (S.restarting && !m.state.restart) { S.restarting = false; setOffline(false); }  // перезапуск не удался, работаем дальше
+    if (S.view === "settings" && wasRestart !== !!m.state.restart) renderSettings();
   } else if (m.type === "questions") {
     refreshState(); refreshQuestions(); refreshTaskD();
   } else if (m.type === "task_event") {
@@ -615,8 +655,11 @@ function connect() {
     const es = new EventSource("/api/events");
     es.onmessage = e => { const m = JSON.parse(e.data); onEvent(m); bc?.postMessage(m); };
     // после (пере)подключения перечитываем всё во всех вкладках: пока связи не было, события терялись
-    es.onopen = () => { resync(true); bc?.postMessage({ type: "resync" }); };
-    es.onerror = () => { if (es.readyState === EventSource.CLOSED) setTimeout(listen, 3000); };
+    es.onopen = () => { setOffline(false); resync(true); bc?.postMessage({ type: "resync" }); };
+    es.onerror = () => {
+      setOffline(true); bc?.postMessage({ type: "offline" });
+      if (es.readyState === EventSource.CLOSED) setTimeout(listen, 3000);
+    };
   };
   if (!bc) return listen();
   bc.onmessage = e => onEvent(e.data);
@@ -665,7 +708,7 @@ document.addEventListener("keydown", e => { if (e.key === "Escape" && $("#modal"
 window.App = {
   setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
   newTask, createTask, openTask, saveTask, comment, toTodo, stopTask, resetTask, deleteTask, closeModal,
-  answer, answerText, toggleAnswered, setSetting, clearPause, addColumn, columnMenu,
+  answer, answerText, toggleAnswered, setSetting, clearPause, restartTracker, addColumn, columnMenu,
   importDialog, importParse, importCommit, toggleChat, chatSend, chatStop, chatReset, removeAtt, togglePipeline,
 };
 

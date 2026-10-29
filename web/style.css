@@ -179,6 +179,7 @@ header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; back
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 8px; z-index: 20; max-width: 90vw; }
+.offline { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn); padding: 8px 16px; border-radius: 8px; z-index: 30; font-weight: 600; box-shadow: var(--shadow); }
 
 /* ---------- settings ---------- */
 .section { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; margin-bottom: 16px; }

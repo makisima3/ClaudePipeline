@@ -42,6 +42,7 @@ class Hub:
 
 
 hub = Hub()
+BOOT_ID = uuid.uuid4().hex  # меняется при каждом старте сервера: по нему страница понимает, что трекер перезапустился
 
 
 def changed(project_id=None):
@@ -64,6 +65,7 @@ TASK_SYSTEM = """Ты — исполнитель задач в личном па
 - Фоновые процессы, которые ты запускал (серверы, watch, установщики), останавливай перед ask_user и finish_task: после конца хода пайплайн всё равно погасит их вместе с твоим процессом. Боевой сервер трекера не трогай.
 - Если по ходу нашлась отдельная работа вне рамок задачи — создай её через mcp__tracker__create_task (в бэклог), а не делай молча.
 - В конце ОБЯЗАТЕЛЬНО вызови mcp__tracker__finish_task: summary — 1-3 предложения, report — подробный markdown (что сделано и как, изменённые файлы, как проверить, принятые решения, открытые вопросы).
+- Если задача меняла код самого трекера ClaudePipeline (папка server/), после finish_task вызови mcp__tracker__restart_tracker: трекер перезапустится сам, когда твой процесс завершится. Сервер трекера руками не останавливай и не перезапускай.
 - Пиши по-русски."""
 
 CHAT_SYSTEM = """Ты — ассистент, встроенный в личный канбан-трекер ClaudePipeline. Пользователь пишет тебе в чат на странице трекера.
@@ -128,6 +130,7 @@ class Orchestrator:
             "enabled": s["pipeline_enabled"],
             "running": list(self.runs.keys()),
             "pause_until": float(s["pause_until"] or 0),
+            "restart": restart.info(),
         }
 
     def set_enabled(self, on):
@@ -146,6 +149,7 @@ class Orchestrator:
     def loop(self):
         while True:
             try:
+                restart.check()
                 self.tick()
             except Exception as e:
                 print(f"[orchestrator] {e}")
@@ -157,7 +161,7 @@ class Orchestrator:
             db.set_setting("pipeline_enabled", "0")
             hub.send("state", state=self.state())
             return
-        if enabled != "1":
+        if enabled != "1" or restart.since:  # перед перезапуском новые задачи не берём
             return
         pause = float(db.get_setting("pause_until") or 0)
         if pause > time.time():
@@ -258,6 +262,10 @@ class Orchestrator:
                 self.manual_stops.discard(tid)
                 db.move_task(tid, "backlog", status="interrupted")
                 task_event(tid, "system", "Остановлено вручную (сессия сохранена: верни в «В работу», чтобы продолжить)")
+            elif restart.since:
+                db.update_task(tid, status="resume",
+                               pending_prompt="Работу прервали: трекер перезапускался. Продолжи задачу с того места, где остановился.")
+                task_event(tid, "system", "Прервано перезапуском трекера — задача продолжится после него")
             else:
                 db.update_task(tid, status="resume",
                                pending_prompt="Работу прервали (пайплайн выключали). Продолжи задачу с того места, где остановился.")
@@ -369,7 +377,7 @@ class Chat:
 
     def send(self, pid, text, attachments=None):
         """attachments — уже сохранённые файлы: [{name, file, size, type}] в db.UPLOADS/<pid>/."""
-        if pid in self.runs:
+        if pid in self.runs or restart.since:
             return False
         p = db.one("SELECT * FROM projects WHERE id=?", (pid,))
         cwd = p["path"] if Path(p["path"]).is_dir() else str(db.ROOT)
@@ -438,6 +446,61 @@ def drop_uploads(pid):
 
 
 chat = Chat()
+
+
+# ---------------- перезапуск сервера ----------------
+RESTART_TIMEOUT = 10 * 60  # дольше выполняющиеся запуски не ждём: прервём, после старта их подхватит recover()
+
+
+def log_restart(text):
+    print(f"[restart] {text}")
+    with open(db.DATA / "restart.log", "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now():%d.%m.%Y %H:%M:%S} [{BOOT_ID[:8]}] {text}\n")
+
+
+class Restart:
+    """Отложенный перезапуск: ждём, пока не останется запусков задач и чата, новых не берём."""
+
+    def __init__(self):
+        self.since = None
+        self.exiting = False
+        self.exit = None  # main.py: запустить новый экземпляр и завершить этот
+
+    def info(self):
+        return {"since": self.since, "busy": len(orch.runs) + len(chat.runs)} if self.since else None
+
+    def request(self, by):
+        if not self.since:
+            self.since = time.time()
+            log_restart(f"запрошен ({by}), выполняется запусков: {len(orch.runs)}, чатов: {len(chat.runs)}")
+        hub.send("state", state=orch.state())
+
+    def check(self):
+        if not self.since or self.exiting:
+            return
+        busy = lambda: list(orch.runs.values()) + list(chat.runs.values())
+        if busy() and time.time() - self.since < RESTART_TIMEOUT:
+            return
+        if busy():
+            log_restart(f"не дождались за {RESTART_TIMEOUT // 60} мин, прерываю запусков: {len(busy())}")
+            for run in busy():
+                run.kill()
+            for _ in range(30):  # даём разобрать итоги: задачи уйдут в resume
+                if not busy():
+                    break
+                time.sleep(0.5)
+        hub.send("restarting")
+        time.sleep(0.5)  # чтобы событие успело уйти в браузер
+        self.exiting = True
+        try:
+            self.exit()
+        except Exception as e:  # новый экземпляр не запустился — работаем дальше
+            log_restart(f"не удалось перезапуститься: {e}")
+            self.since, self.exiting = None, False
+            hub.send("state", state=orch.state())
+
+
+restart = Restart()
 
 
 # ---------------- обработчики MCP-инструментов ----------------
@@ -553,6 +616,12 @@ def _mcp(tool, a, tid, pid):
     if tool == "set_pipeline":
         orch.set_enabled(bool(a["enabled"]))
         return "Пайплайн " + ("включён" if a["enabled"] else "выключается")
+    if tool == "restart_tracker":
+        restart.request(f"задача #{tid}" if tid else f"чат проекта {pid}")
+        if tid:
+            task_event(tid, "system", "Запрошен перезапуск трекера")
+        return ("Перезапуск запрошен: трекер перезапустится, когда завершатся все запуски агентов и чата, включая твой "
+                f"(не дольше {RESTART_TIMEOUT // 60} мин). Больше ничего не делай, заверши ход.")
     if tool == "approve_status":
         qu = db.get_question(int(a["question_id"]))
         if qu["status"] == "open":
