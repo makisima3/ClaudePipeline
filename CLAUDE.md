@@ -21,7 +21,7 @@
 - `server/mcp_tracker.py` — stdio MCP-сервер, который запускает сам Claude Code. Тонкая прослойка: набор инструментов зависит от роли (`TASK_TOOLS` для `task`, `CHAT_TOOLS` для `chat`), каждый вызов уходит в `POST /api/mcp/call`. Исключение — `approve`: он сам опрашивает `approve_status`, пока пользователь не ответит. `create_task` (обе роли) принимает `links` — id связанных задач; `get_task` (обе роли) отдаёт `links` с итогами и путями к отчётам; `update_task` (chat) — `links` добавить, `unlink` убрать.
 - `server/db.py` — SQLite `data/tracker.db` (WAL, один connection под `RLock`). Хелперы `q/one/ex`, схема в `SCHEMA`, настройки по умолчанию в `DEFAULT_SETTINGS`, системные колонки в `SYSTEM_COLUMNS`.
 - `web/` — чистые HTML/CSS/JS без сборки и фреймворков: `index.html` + `app.js` (вся SPA), `md.js` (свой рендер markdown), `report.html` (страница отчёта), `style.css`.
-- `docs/screenshots/` — скриншоты для README. Снимать только на демо-данных (копия трекера во временной папке на другом порту + headless Edge `--screenshot`), не на боевой базе.
+- `docs/screenshots/` — скриншоты для README. Снимать только на демо-данных (копия трекера во временной папке на другом порту + headless Edge `--screenshot --virtual-time-budget`), не на боевой базе. В копии подключить перед `app.js` вспомогательный скрипт: он подменяет `EventSource` заглушкой (с открытым SSE headless Edge не дожидается конца загрузки), открывает нужный экран по параметрам URL и подставляет ответ импорта. `recover()` при старте копии переводит `running` в `resume` и отменяет запросы прав — такие данные править в базе после старта. Плашку обновления даёт временный клон с bare-репозиторием в роли `origin`, в котором есть новые коммиты.
 
 ## Схема БД (кратко)
 
