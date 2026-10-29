@@ -126,7 +126,7 @@ def api_project_update(h, body, query, pid):
 def api_project_delete(h, body, query, pid):
     for t in db.q("SELECT id FROM tasks WHERE project_id=?", (pid,)):
         pl.orch.stop_task(t["id"])
-    pl.chat.stop(pid)
+    pl.chat.stop_project(pid)
     db.ex("DELETE FROM projects WHERE id=?", (pid,))
     pl.drop_uploads(pid)
     pl.changed()
@@ -300,9 +300,42 @@ def api_answer(h, body, query, qid):
 
 
 # ---------------- чат ----------------
-@route("GET", r"/api/projects/(\d+)/chat")
-def api_chat(h, body, query, pid):
-    return {"messages": db.chat_messages(pid), "running": pl.chat.running(pid)}
+def get_chat(cid):
+    c = db.get_chat(cid)
+    need(c, "Чат не найден")
+    return c
+
+
+@route("GET", r"/api/projects/(\d+)/chats")
+def api_chats(h, body, query, pid):
+    return {"chats": [pl.chat.info(c) for c in db.list_chats(pid)]}
+
+
+@route("POST", r"/api/projects/(\d+)/chats")
+def api_chat_create(h, body, query, pid):
+    need(db.one("SELECT id FROM projects WHERE id=?", (pid,)), "Проект не найден")
+    return pl.chat.create(pid)
+
+
+@route("PATCH", r"/api/chats/(\d+)")
+def api_chat_rename(h, body, query, cid):
+    get_chat(cid)
+    title = re.sub(r"\s+", " ", str(body.get("title") or "")).strip()[:200]
+    need(title, "Пустое название", 400)
+    pl.chat.rename(cid, title)
+    return pl.chat.info(db.get_chat(cid))
+
+
+@route("DELETE", r"/api/chats/(\d+)")
+def api_chat_delete(h, body, query, cid):
+    get_chat(cid)
+    pl.chat.delete(cid)
+    return {"ok": True}
+
+
+@route("GET", r"/api/chats/(\d+)/messages")
+def api_chat_messages(h, body, query, cid):
+    return {"chat": pl.chat.info(get_chat(cid)), "messages": db.chat_messages(cid), "running": pl.chat.running(cid)}
 
 
 WIN_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
@@ -325,7 +358,7 @@ def mb(n):
     return f"{n / 1024 / 1024:.0f} МБ"
 
 
-def save_uploads(pid, items):
+def save_uploads(folder, items):
     """Проверить и сохранить вложения: сначала всё декодируем, потом пишем — без полусохранённых сообщений."""
     need(isinstance(items, list), "Вложения должны быть списком", 400)
     need(len(items) <= MAX_FILES, f"Не больше {MAX_FILES} вложений в одном сообщении", 400)
@@ -341,7 +374,6 @@ def save_uploads(pid, items):
         total += len(raw)
         decoded.append((name, raw, str(it.get("type") or "")[:100]))
     need(total <= MAX_TOTAL, f"Вложения вместе больше {mb(MAX_TOTAL)}", 413)
-    folder = db.UPLOADS / str(pid)
     folder.mkdir(parents=True, exist_ok=True)
     stamp, saved = time.strftime("%Y%m%d-%H%M%S"), []
     for name, raw, ctype in decoded:
@@ -356,16 +388,16 @@ def save_uploads(pid, items):
     return saved
 
 
-@route("POST", r"/api/projects/(\d+)/chat")
-def api_chat_send(h, body, query, pid):
-    need(db.one("SELECT id FROM projects WHERE id=?", (pid,)), "Проект не найден")
+@route("POST", r"/api/chats/(\d+)/messages")
+def api_chat_send(h, body, query, cid):
+    c = get_chat(cid)
     text = (body.get("text") or "").strip()
     items = body.get("attachments") or []
     need(text or items, "Пустое сообщение", 400)
-    need(not pl.chat.running(pid), "Я ещё отвечаю на прошлое сообщение", 409)
+    need(not pl.chat.running(cid), "Я ещё отвечаю на прошлое сообщение в этом чате", 409)
     need(not pl.restart.since, "Трекер перезапускается — отправь сообщение через минуту", 409)
-    attachments = save_uploads(pid, items) if items else None
-    need(pl.chat.send(pid, text, attachments), "Я ещё отвечаю на прошлое сообщение", 409)
+    attachments = save_uploads(db.chat_dir(c["project_id"], cid), items) if items else None
+    need(pl.chat.send(cid, text, attachments), "Я ещё отвечаю на прошлое сообщение в этом чате", 409)
     return {"ok": True}
 
 
@@ -375,11 +407,11 @@ TEXT_TYPES = ("text/", "application/json", "application/javascript", "applicatio
 
 @route("GET", r"/api/chat/(\d+)/files/(\d+)")
 def api_chat_file(h, body, query, mid, idx):
-    m = db.one("SELECT project_id, attachments FROM chat_messages WHERE id=?", (mid,))
+    m = db.one("SELECT project_id, chat_id, attachments FROM chat_messages WHERE id=?", (mid,))
     atts = json.loads(m["attachments"]) if m and m["attachments"] else []
     need(idx < len(atts), "Вложение не найдено")
     a = atts[idx]
-    f = db.UPLOADS / str(m["project_id"]) / a["file"]
+    f = db.chat_dir(m["project_id"], m["chat_id"]) / a["file"]
     need(f.is_file(), "Файл вложения удалён")
     ctype = mimetypes.guess_type(a["name"])[0] or ""
     # активное содержимое (html, svg, js) не исполняем: текст и неизвестное — как text/plain, прочее — скачиванием
@@ -394,15 +426,9 @@ def api_chat_file(h, body, query, mid, idx):
     return h.send_bytes(f.read_bytes(), ctype, {"Content-Disposition": f"{disp}; filename*=UTF-8''{quote(a['name'])}"})
 
 
-@route("POST", r"/api/projects/(\d+)/chat/stop")
-def api_chat_stop(h, body, query, pid):
-    pl.chat.stop(pid)
-    return {"ok": True}
-
-
-@route("POST", r"/api/projects/(\d+)/chat/reset")
-def api_chat_reset(h, body, query, pid):
-    pl.chat.reset(pid)
+@route("POST", r"/api/chats/(\d+)/stop")
+def api_chat_stop(h, body, query, cid):
+    pl.chat.stop(cid)
     return {"ok": True}
 
 

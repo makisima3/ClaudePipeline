@@ -3,6 +3,7 @@ import json
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +24,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL, color TEXT DEFAULT '#6c8cff',
-    active INTEGER DEFAULT 1, chat_session_id TEXT, created_at REAL
+    active INTEGER DEFAULT 1, chat_session_id TEXT, created_at REAL  -- chat_session_id устарел: сессии в chats
 );
 CREATE TABLE IF NOT EXISTS columns (
     id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -46,9 +47,13 @@ CREATE TABLE IF NOT EXISTS questions (
     kind TEXT DEFAULT 'question', text TEXT, options TEXT, payload TEXT, answer TEXT,
     status TEXT DEFAULT 'open', created_at REAL, answered_at REAL
 );
+CREATE TABLE IF NOT EXISTS chats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title TEXT, session_id TEXT, created_at REAL, updated_at REAL
+);
 CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    role TEXT, text TEXT, ts REAL, attachments TEXT
+    role TEXT, text TEXT, ts REAL, attachments TEXT, chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE
 );
 """
 
@@ -81,6 +86,43 @@ with _lock:
     # миграции старых баз
     if "attachments" not in {r["name"] for r in _conn.execute("PRAGMA table_info(chat_messages)")}:
         _conn.execute("ALTER TABLE chat_messages ADD COLUMN attachments TEXT")
+    if "chat_id" not in {r["name"] for r in _conn.execute("PRAGMA table_info(chat_messages)")}:
+        _conn.execute("ALTER TABLE chat_messages ADD COLUMN chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE")
+    _conn.execute("CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id, id)")
+
+
+def _migrate_chats():
+    """Один чат на проект (projects.chat_session_id + сообщения без chat_id) -> первый чат в списке chats."""
+    moved = []
+    with _lock:
+        rows = _conn.execute("""SELECT p.id, p.chat_session_id, p.created_at, MIN(m.ts) AS first, MAX(m.ts) AS last
+                                FROM projects p LEFT JOIN chat_messages m ON m.project_id=p.id AND m.chat_id IS NULL
+                                GROUP BY p.id HAVING p.chat_session_id IS NOT NULL OR COUNT(m.id) > 0""").fetchall()
+        if not rows:
+            return
+        _conn.execute("BEGIN")
+        try:
+            for r in rows:
+                first = r["first"] or r["created_at"] or time.time()
+                cid = _conn.execute("INSERT INTO chats(project_id, title, session_id, created_at, updated_at) VALUES(?,?,?,?,?)",
+                                    (r["id"], f"Чат от {datetime.fromtimestamp(first):%d.%m.%Y}", r["chat_session_id"],
+                                     first, r["last"] or first)).lastrowid
+                _conn.execute("UPDATE chat_messages SET chat_id=? WHERE project_id=? AND chat_id IS NULL", (cid, r["id"]))
+                _conn.execute("UPDATE projects SET chat_session_id=NULL WHERE id=?", (r["id"],))
+                moved.append((r["id"], cid))
+        except BaseException:
+            _conn.execute("ROLLBACK")
+            raise
+        _conn.execute("COMMIT")
+    for pid, cid in moved:  # вложения: data/uploads/<pid>/<файл> -> data/uploads/<pid>/<cid>/<файл>
+        files = [f for f in (UPLOADS / str(pid)).glob("*") if f.is_file()]
+        if files:
+            (UPLOADS / str(pid) / str(cid)).mkdir(parents=True, exist_ok=True)
+        for f in files:
+            f.replace(UPLOADS / str(pid) / str(cid) / f.name)
+
+
+_migrate_chats()
 
 
 def q(sql, args=()):
@@ -209,14 +251,41 @@ def list_questions(status="open"):
 
 
 # ---------- chat ----------
-def add_chat(project_id, role, text, attachments=None):
-    """attachments: [{name, file, size, type}], file — имя в data/uploads/<project_id>/."""
-    return ex("INSERT INTO chat_messages(project_id, role, text, ts, attachments) VALUES(?,?,?,?,?)",
-              (project_id, role, text, now(), json.dumps(attachments, ensure_ascii=False) if attachments else None))
+def chat_dir(project_id, chat_id):
+    """Папка вложений чата."""
+    return UPLOADS / str(project_id) / str(chat_id)
 
 
-def chat_messages(project_id, limit=300):
-    rows = q("SELECT * FROM chat_messages WHERE project_id=? ORDER BY id DESC LIMIT ?", (project_id, limit))[::-1]
+def get_chat(chat_id):
+    return one("SELECT * FROM chats WHERE id=?", (chat_id,))
+
+
+def list_chats(project_id):
+    return q("""SELECT c.*, (SELECT COUNT(*) FROM chat_messages m WHERE m.chat_id=c.id) AS messages
+                FROM chats c WHERE c.project_id=? ORDER BY c.updated_at DESC, c.id DESC""", (project_id,))
+
+
+def create_chat(project_id, title=None):
+    t = now()
+    return ex("INSERT INTO chats(project_id, title, created_at, updated_at) VALUES(?,?,?,?)", (project_id, title, t, t))
+
+
+def add_chat(chat_id, role, text, attachments=None):
+    """attachments: [{name, file, size, type}], file — имя в data/uploads/<project_id>/<chat_id>/.
+    None — чата уже нет (удалили, пока шёл ответ)."""
+    with _lock:
+        c = get_chat(chat_id)
+        if not c:
+            return None
+        t = now()
+        ex("UPDATE chats SET updated_at=? WHERE id=?", (t, chat_id))
+        return ex("INSERT INTO chat_messages(project_id, chat_id, role, text, ts, attachments) VALUES(?,?,?,?,?,?)",
+                  (c["project_id"], chat_id, role, text, t,
+                   json.dumps(attachments, ensure_ascii=False) if attachments else None))
+
+
+def chat_messages(chat_id, limit=300):
+    rows = q("SELECT * FROM chat_messages WHERE chat_id=? ORDER BY id DESC LIMIT ?", (chat_id, limit))[::-1]
     for r in rows:
         r["attachments"] = json.loads(r["attachments"]) if r["attachments"] else []
     return rows

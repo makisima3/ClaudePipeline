@@ -16,7 +16,7 @@ const COLORS = ["#c8642c", "#3b6fd8", "#2f8a57", "#9b4dca", "#d64571", "#b07a12"
 
 const S = {
   state: null, view: ls.get("view", "board"), projectId: ls.get("project", null), board: null,
-  chatOpen: ls.get("chatOpen", true), chat: { messages: [], running: false }, task: null, showAnswered: false,
+  chatOpen: ls.get("chatOpen", true), chat: { id: null, pid: null, messages: [], running: false }, chats: [], task: null, showAnswered: false,
 };
 
 async function api(method, url, body) {
@@ -64,10 +64,37 @@ async function loadBoard() {
   if (S.view === "board" && !same) renderBoard();  // без изменений не перерисовываем: не сбиваем перетаскивание
 }
 
+// список чатов проекта; открыт последний открытый в этом проекте (localStorage chat.<pid>) или самый свежий
+async function loadChats() {
+  const ok = fresh("chats"), pid = S.projectId;
+  if (!pid) { S.chats = []; return; }
+  const r = await api("GET", `/api/projects/${pid}/chats`);
+  if (!ok() || pid !== S.projectId) return;
+  S.chats = r.chats;
+  renderChatHead();
+}
+
 async function loadChat() {
   if (!S.projectId) return;
-  S.chat = await api("GET", `/api/projects/${S.projectId}/chat`);
-  renderChat();
+  await loadChats();
+  const has = id => id && S.chats.some(c => c.id === id);
+  let id = S.chat.pid === S.projectId ? S.chat.id : ls.get(`chat.${S.projectId}`, null);
+  if (!has(id)) id = S.chats[0]?.id || null;
+  await openChat(id);
+}
+
+async function openChat(id) {
+  const ok = fresh("chat"), pid = S.projectId;
+  S.chatListOpen = false;
+  if (!id) { S.chat = { id: null, pid, messages: [], running: false }; return renderChat(); }
+  const r = await api("GET", `/api/chats/${id}/messages`);
+  if (!ok() || pid !== S.projectId) return;
+  const switched = S.chat.id !== id;
+  S.chat = { id, pid, messages: r.messages, running: r.running };
+  const i = S.chats.findIndex(x => x.id === id);
+  if (i >= 0) S.chats[i] = r.chat; else S.chats.unshift(r.chat);
+  ls.set(`chat.${pid}`, id);
+  renderChat(switched);
 }
 
 // ---------------- шапка ----------------
@@ -91,8 +118,6 @@ function renderHeader() {
     else text = pl.running.length ? `Работает · задач: ${pl.running.length}` : "Включён · ждёт задач";
   }
   $("#pstate").textContent = text;
-  const p = project();
-  $("#chatTitle").textContent = p ? `Чат · ${p.name}` : "Чат";
   renderUpdate();
 }
 
@@ -559,9 +584,29 @@ async function importCommit() {
 }
 
 // ---------------- чат ----------------
-function renderChat() {
+const chatName = c => c?.title || "Новый чат";
+
+function renderChatHead() {
+  const cur = S.chats.find(c => c.id === S.chat.id), p = project();
+  const others = S.chats.filter(c => c.running && c.id !== S.chat.id).length;
+  $("#chatTitle").textContent = cur ? chatName(cur) : "Чат";
+  $("#chatPick").title = `Чаты проекта «${p?.name || ""}»` + (others ? ` · отвечает в другом чате: ${others}` : "");
+  $("#chatOthers").classList.toggle("hidden", !others);
+  const list = $("#chatList");
+  list.classList.toggle("hidden", !S.chatListOpen);
+  if (!S.chatListOpen) return;
+  list.innerHTML = S.chats.map(c => `<div class="chat-item ${c.id === S.chat.id ? "active" : ""}" onclick="App.openChat(${c.id})">
+      <div class="grow"><div class="ci-title">${c.running ? '<span class="pulse"></span>' : ""}${esc(chatName(c))}</div>
+      <small>${c.running ? "отвечает · " : ""}${fmtTime(c.updated_at)} · сообщений: ${c.messages}</small></div>
+      <button class="ghost" onclick="event.stopPropagation(); App.renameChat(${c.id})" title="Переименовать">✎</button>
+      <button class="ghost" onclick="event.stopPropagation(); App.deleteChat(${c.id})" title="Удалить чат">🗑</button></div>`).join("") ||
+    `<div class="muted" style="padding:12px">Чатов пока нет — просто напиши сообщение.</div>`;
+}
+
+function renderChat(toBottom) {
+  renderChatHead();
   const box = $("#msgs");
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  const atBottom = toBottom || box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   box.innerHTML = S.chat.messages.map(msgHtml).join("") ||
     `<div class="muted" style="padding:20px;text-align:center">Это чат с Claude внутри трекера. Он видит доску и может создавать и двигать задачи, отвечать про статус, включать пайплайн. Можно вставить сюда текст задач — он их заведёт.</div>`;
   $("#typing").classList.toggle("hidden", !S.chat.running);
@@ -630,12 +675,13 @@ const fileBase64 = file => new Promise((ok, fail) => {
 async function chatSend() {
   const inp = $("#chatInput"), text = inp.value.trim();
   if ((!text && !S.atts.length) || !S.projectId || S.chatSending) return;
-  if (S.chat.running) return toast("Подожди, я ещё отвечаю");
+  if (S.chat.running) return toast("Подожди, я ещё отвечаю в этом чате");
   S.chatSending = true;
   try {
     const attachments = await Promise.all(S.atts.map(async a => ({ name: a.name, type: a.file.type, data: await fileBase64(a.file) })));
     inp.value = "";
-    await api("POST", `/api/projects/${S.projectId}/chat`, { text, attachments });
+    if (!S.chat.id) await openChat((await api("POST", `/api/projects/${S.projectId}/chats`)).id);  // первое сообщение в проекте
+    await api("POST", `/api/chats/${S.chat.id}/messages`, { text, attachments });
     clearAtts();
   } catch (e) {
     if (!inp.value) inp.value = text;
@@ -644,8 +690,36 @@ async function chatSend() {
   }
 }
 
-async function chatStop() { await api("POST", `/api/projects/${S.projectId}/chat/stop`); }
-async function chatReset() { if (confirm("Начать новый чат? История этого проекта будет очищена.")) { await api("POST", `/api/projects/${S.projectId}/chat/reset`); loadChat(); } }
+async function chatStop() { if (S.chat.id) await api("POST", `/api/chats/${S.chat.id}/stop`); }
+
+// «Новый» ничего не удаляет: старые чаты остаются в списке
+async function chatNew() {
+  const c = await api("POST", `/api/projects/${S.projectId}/chats`);
+  await loadChats(); await openChat(c.id);
+  $("#chatInput").focus();
+}
+
+function toggleChatList() {
+  S.chatListOpen = !S.chatListOpen; renderChatHead();
+  if (S.chatListOpen) loadChats().catch(() => { });  // даты и счётчики свежие
+}
+
+async function renameChat(id) {
+  const c = S.chats.find(x => x.id === id);
+  const title = prompt("Название чата", chatName(c));
+  if (!title?.trim()) return;
+  await api("PATCH", `/api/chats/${id}`, { title });
+  loadChats();
+}
+
+async function deleteChat(id) {
+  const c = S.chats.find(x => x.id === id);
+  if (!confirm(`Удалить чат «${chatName(c)}»? Его сообщения и вложения будут стёрты, остальные чаты не тронутся.`)) return;
+  await api("DELETE", `/api/chats/${id}`);
+  S.chats = S.chats.filter(x => x.id !== id);
+  if (id === S.chat.id) await openChat(S.chats[0]?.id || null);
+  S.chatListOpen = true; renderChatHead();
+}
 function toggleChat() { S.chatOpen = !S.chatOpen; ls.set("chatOpen", S.chatOpen); render(); if (S.chatOpen) loadChat(); }
 
 // ---------------- пайплайн ----------------
@@ -679,6 +753,7 @@ const refreshBoard = debounce(() => { if (S.view === "board") loadBoard(); });
 const refreshState = debounce(() => loadState());
 const refreshTaskD = debounce(() => refreshTask(), 250);
 const refreshQuestions = debounce(() => { if (S.view === "questions") renderQuestions(); });
+const refreshChats = debounce(() => loadChats().catch(() => { }));
 
 // сверка с сервером; full — ещё чат и вопросы (после переподключения, когда события могли потеряться)
 async function resync(full) {
@@ -721,12 +796,15 @@ function onEvent(m) {
         if (atBottom) tl.scrollTop = tl.scrollHeight;
       }
     }
-  } else if (m.type === "chat" && m.project_id === S.projectId) {
-    S.chat.messages.push(m.message); renderChat();
+  } else if (m.type === "chat" && m.chat_id === S.chat.id) {  // сообщения других чатов сюда не попадают
+    if (!S.chat.messages.some(x => x.id === m.message.id)) { S.chat.messages.push(m.message); renderChat(); }
   } else if (m.type === "chat_state" && m.project_id === S.projectId) {
-    S.chat.running = m.running; renderChat();
-  } else if (m.type === "chat_reset" && m.project_id === S.projectId) {
-    S.chat = { messages: [], running: false }; renderChat();
+    const c = S.chats.find(x => x.id === m.chat_id);
+    if (c) c.running = m.running; else refreshChats();
+    if (m.chat_id === S.chat.id) { S.chat.running = m.running; renderChat(); } else renderChatHead();
+  } else if (m.type === "chats" && m.project_id === S.projectId) {
+    if (m.deleted && m.chat_id === S.chat.id) { S.chat = { id: null, pid: null, messages: [], running: false }; loadChat().catch(() => { }); }
+    else refreshChats();
   }
 }
 
@@ -787,14 +865,22 @@ $("#chatFile").addEventListener("change", e => { addFiles(e.target.files); e.tar
   document.addEventListener("dragover", e => { if (hasFiles(e)) e.preventDefault(); });
   document.addEventListener("drop", e => { if (hasFiles(e)) e.preventDefault(); });
 }
-document.addEventListener("keydown", e => { if (e.key === "Escape" && $("#modal").innerHTML) closeModal(); });
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if ($("#modal").innerHTML) closeModal();
+  else if (S.chatListOpen) { S.chatListOpen = false; renderChatHead(); }
+});
+// список чатов закрывается кликом мимо него
+document.addEventListener("click", e => {
+  if (S.chatListOpen && !e.target.closest("#chatList, #chatPick")) { S.chatListOpen = false; renderChatHead(); }
+});
 
 window.App = {
   setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
   newTask, createTask, openTask, saveTask, comment, toTodo, stopTask, resetTask, deleteTask, closeModal,
   answer, answerText, toggleAnswered, setSetting, clearPause, restartTracker, addColumn, columnMenu,
   checkUpdate, applyUpdate, toggleUpdList, hideUpdate,
-  importDialog, importParse, importCommit, toggleChat, chatSend, chatStop, chatReset, removeAtt, togglePipeline,
+  importDialog, importParse, importCommit, toggleChat, chatSend, chatStop, chatNew, toggleChatList, openChat, renameChat, deleteChat, removeAtt, togglePipeline,
 };
 
 (async () => {

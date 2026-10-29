@@ -27,11 +27,12 @@
   <div class="view" id="view"></div>
   <aside class="chat hidden" id="chat">
     <div class="chat-head">
-      <b id="chatTitle">Чат</b>
+      <button class="ghost chat-pick" id="chatPick" onclick="App.toggleChatList()"><b id="chatTitle">Чат</b><span class="pulse hidden" id="chatOthers"></span> ▾</button>
       <button class="ghost hidden" id="chatStop" onclick="App.chatStop()">Стоп</button>
-      <button class="ghost" onclick="App.chatReset()" title="Начать новую сессию чата">Новый</button>
+      <button class="ghost" onclick="App.chatNew()" title="Начать новый чат (старые остаются в списке ▾)">Новый</button>
       <button class="ghost" onclick="App.toggleChat()">✕</button>
     </div>
+    <div class="chat-list hidden" id="chatList"></div>
     <div class="msgs" id="msgs"></div>
     <div class="typing hidden" id="typing"><span class="spinner"></span> думаю…</div>
     <div class="chat-input">

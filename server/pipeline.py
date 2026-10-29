@@ -368,80 +368,123 @@ def on_manual_move(tid, kind):
 
 
 # ---------------- чат ----------------
+CHAT_TITLE_LEN = 50
+
+
+def chat_title(text, attachments=None):
+    """Название чата из первого сообщения пользователя: первая строка, не длиннее CHAT_TITLE_LEN."""
+    line = next((l.strip() for l in (text or "").splitlines() if l.strip()), "")
+    line = line or (attachments[0]["name"] if attachments else "") or "Новый чат"
+    return line if len(line) <= CHAT_TITLE_LEN else line[:CHAT_TITLE_LEN - 1].rstrip() + "…"
+
+
 class Chat:
+    """Чаты проекта: у каждого своя сессия Claude, отвечать одновременно могут разные чаты, но не два ответа в одном."""
+
     def __init__(self):
-        self.runs = {}  # project_id -> ClaudeRun
+        self.runs = {}  # chat_id -> ClaudeRun
 
-    def running(self, pid):
-        return pid in self.runs
+    def running(self, cid):
+        return cid in self.runs
 
-    def send(self, pid, text, attachments=None):
-        """attachments — уже сохранённые файлы: [{name, file, size, type}] в db.UPLOADS/<pid>/."""
-        if pid in self.runs or restart.since:
+    def info(self, c):
+        return {**c, "running": c["id"] in self.runs}
+
+    def create(self, pid):
+        """Новый чат. Пустой безымянный чат проекта не плодим — отдаём его."""
+        empty = db.one("""SELECT id FROM chats c WHERE project_id=? AND title IS NULL
+                          AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.chat_id=c.id)""", (pid,))
+        cid = empty["id"] if empty else db.create_chat(pid)
+        if empty:
+            db.ex("UPDATE chats SET updated_at=? WHERE id=?", (time.time(), cid))
+        hub.send("chats", project_id=pid, chat_id=cid)
+        return self.info(db.get_chat(cid))
+
+    def rename(self, cid, title):
+        c = db.get_chat(cid)
+        db.ex("UPDATE chats SET title=? WHERE id=?", (title, cid))
+        hub.send("chats", project_id=c["project_id"], chat_id=cid)
+
+    def send(self, cid, text, attachments=None):
+        """attachments — уже сохранённые файлы: [{name, file, size, type}] в db.chat_dir(pid, cid)."""
+        if cid in self.runs or restart.since:
             return False
+        c = db.get_chat(cid)
+        pid = c["project_id"]
         p = db.one("SELECT * FROM projects WHERE id=?", (pid,))
         cwd = p["path"] if Path(p["path"]).is_dir() else str(db.ROOT)
-        self._msg(pid, "user", text, attachments)
+        if not c["title"]:
+            db.ex("UPDATE chats SET title=? WHERE id=?", (chat_title(text, attachments), cid))
+        self._msg(cid, pid, "user", text, attachments)
+        hub.send("chats", project_id=pid, chat_id=cid)
+        folder = db.chat_dir(pid, cid)
         prompt = text
         if attachments:
-            folder = db.UPLOADS / str(pid)
             prompt = (text or "Пользователь прислал вложения без текста — посмотри их.")
             prompt += "\n\nВложения (открой через Read, картинки ты видишь):\n"
             prompt += "\n".join(f"- {folder / a['file']}" for a in attachments)
-        resume = bool(p["chat_session_id"])
-        sid = p["chat_session_id"] or str(uuid.uuid4())
+        resume = bool(c["session_id"])
+        sid = c["session_id"] or str(uuid.uuid4())
         if not resume:
-            db.ex("UPDATE projects SET chat_session_id=? WHERE id=?", (sid, pid))
+            db.ex("UPDATE chats SET session_id=? WHERE id=?", (sid, cid))
         s = db.get_settings()
         run = ClaudeRun(
-            key=f"chat-{pid}", cwd=cwd, prompt=prompt, session_id=sid, resume=resume, role="chat",
+            key=f"chat-{pid}-{cid}", cwd=cwd, prompt=prompt, session_id=sid, resume=resume, role="chat",
             system_prompt=CHAT_SYSTEM.format(name=p["name"], id=pid, path=p["path"]), project_id=pid,
             model=s["chat_model"] or s["model"] or None, permission_mode=s["permission_mode"],
-            log_path=db.DATA / "runs" / f"chat-{pid}.jsonl", add_dirs=[str(db.UPLOADS / str(pid))] if attachments else None,
-            on_text=lambda t: self._msg(pid, "assistant", t),
-            on_tool=lambda n, i: None if n in QUIET_TOOLS else self._msg(pid, "tool", short_tool(n.replace("mcp__tracker__", "трекер."), i)),
-            on_done=lambda r: self._done(pid, r),
+            log_path=db.DATA / "runs" / f"chat-{pid}-{cid}.jsonl", add_dirs=[str(folder)] if attachments else None,
+            on_text=lambda t: self._msg(cid, pid, "assistant", t),
+            on_tool=lambda n, i: None if n in QUIET_TOOLS else self._msg(cid, pid, "tool", short_tool(n.replace("mcp__tracker__", "трекер."), i)),
+            on_done=lambda r: self._done(cid, pid, r),
         )
-        self.runs[pid] = run
-        hub.send("chat_state", project_id=pid, running=True)
+        self.runs[cid] = run
+        hub.send("chat_state", project_id=pid, chat_id=cid, running=True)
         try:
             run.start()
         except Exception as e:
-            self.runs.pop(pid, None)
-            self._msg(pid, "error", f"Не удалось запустить claude: {e}")
-            hub.send("chat_state", project_id=pid, running=False)
+            self.runs.pop(cid, None)
+            self._msg(cid, pid, "error", f"Не удалось запустить claude: {e}")
+            hub.send("chat_state", project_id=pid, chat_id=cid, running=False)
         return True
 
-    def _msg(self, pid, role, text, attachments=None):
-        mid = db.add_chat(pid, role, text, attachments)
-        hub.send("chat", project_id=pid, message={"id": mid, "role": role, "text": text, "ts": time.time(),
-                                                  "attachments": attachments or []})
+    def _msg(self, cid, pid, role, text, attachments=None):
+        mid = db.add_chat(cid, role, text, attachments)
+        if mid:  # None — чат удалили, пока шёл ответ
+            hub.send("chat", project_id=pid, chat_id=cid, message={"id": mid, "role": role, "text": text,
+                                                                   "ts": time.time(), "attachments": attachments or []})
 
-    def _done(self, pid, r):
-        self.runs.pop(pid, None)
+    def _done(self, cid, pid, r):
+        self.runs.pop(cid, None)
         if r.get("is_error") and not r.get("killed"):
             err = str(r.get("result"))
             if "No conversation found" in err:
-                db.ex("UPDATE projects SET chat_session_id=NULL WHERE id=?", (pid,))
+                db.ex("UPDATE chats SET session_id=NULL WHERE id=?", (cid,))
                 err += "\n(сессия чата сброшена, отправь сообщение ещё раз)"
-            self._msg(pid, "error", err[:2000])
-        hub.send("chat_state", project_id=pid, running=False)
+            self._msg(cid, pid, "error", err[:2000])
+        hub.send("chat_state", project_id=pid, chat_id=cid, running=False)
 
-    def stop(self, pid):
-        run = self.runs.get(pid)
+    def stop(self, cid):
+        run = self.runs.get(cid)
         if run:
             run.kill()
 
-    def reset(self, pid):
-        self.stop(pid)
-        db.ex("UPDATE projects SET chat_session_id=NULL WHERE id=?", (pid,))
-        db.ex("DELETE FROM chat_messages WHERE project_id=?", (pid,))
-        drop_uploads(pid)
-        hub.send("chat_reset", project_id=pid)
+    def stop_project(self, pid):
+        for run in list(self.runs.values()):
+            if run.project_id == pid:
+                run.kill()
+
+    def delete(self, cid):
+        """Удалить чат: его сообщения и вложения. Идущий ответ прерывается и уже никуда не пишется."""
+        c = db.get_chat(cid)
+        self.stop(cid)
+        db.ex("DELETE FROM chat_messages WHERE chat_id=?", (cid,))
+        db.ex("DELETE FROM chats WHERE id=?", (cid,))
+        shutil.rmtree(db.chat_dir(c["project_id"], cid), ignore_errors=True)
+        hub.send("chats", project_id=c["project_id"], chat_id=cid, deleted=True)
 
 
 def drop_uploads(pid):
-    """Вложения чата проекта больше не нужны: история и сессия удалены."""
+    """Вложения всех чатов проекта больше не нужны: проект удалён."""
     shutil.rmtree(db.UPLOADS / str(pid), ignore_errors=True)
 
 

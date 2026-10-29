@@ -6,11 +6,11 @@
 
 - `server/main.py` — HTTP API + SSE на `ThreadingHTTPServer`. Эндпоинты объявляются декоратором `@route("METHOD", r"/api/...")`; группы `(\d+)` приходят в обработчик как `int` после `(h, body, query)`. Ошибки — `need(cond, msg, code)` или `HttpError`. Тут же отдача статики из `web/`, `/report/<id>` → `report.html`, приём вложений чата (лимиты `MAX_*`), запуск сервера: `bind()` (с `--after <pid>` сначала ждёт выхода старого экземпляра), `spawn_successor()` для перезапуска. `Server.allow_reuse_address` в Windows выключен: иначе второй процесс молча занял бы тот же порт.
 - `server/pipeline.py` — всё, что связано с логикой:
-  - `Hub`/`hub` — рассылка SSE-событий (`changed`, `state`, `task_event`, `chat`, `questions`…);
+  - `Hub`/`hub` — рассылка SSE-событий (`changed`, `state`, `task_event`, `chat`/`chat_state`/`chats` — с `project_id` и `chat_id`, `questions`…);
   - промпты `TASK_SYSTEM`, `CHAT_SYSTEM`;
   - `Orchestrator`/`orch` — цикл `tick()` раз в 1,5 с, лимит `max_parallel`, в одном проекте одна задача за раз, пауза по лимиту подписки (`pause_until`), `recover()` после рестарта;
   - `finish_task`, `answer_question`, `on_manual_move`;
-  - `Chat`/`chat` — сессия чата на проект;
+  - `Chat`/`chat` — чаты проекта: `runs` по `chat_id`, у каждого чата своя сессия Claude (`chats.session_id`, продолжение через `--resume`). Отвечать одновременно могут разные чаты, в одном чате — один ответ за раз. `create` (пустой безымянный чат проекта не плодит, отдаёт его), `rename`, `send` (название из первого сообщения — `chat_title`, до `CHAT_TITLE_LEN` символов), `stop`, `stop_project`, `delete` (сообщения и папка вложений чата). Сообщение в удалённый чат `db.add_chat` молча не пишет: ответ, прерванный удалением, никуда не попадает;
   - `Restart`/`restart` — отложенный перезапуск сервера (см. ниже), `BOOT_ID` — id текущего запуска, `log_restart` пишет в `data/restart.log`;
   - `mcp_call`/`_mcp` — обработчики всех MCP-инструментов;
   - `import_parse` — разбор текста в задачи через `claude -p --json-schema`.
@@ -23,7 +23,7 @@
 
 ## Схема БД (кратко)
 
-`settings(key, value)`, `projects` (path — рабочая папка Claude, `chat_session_id`), `columns` (`kind`: backlog/todo/progress/waiting/done у системных, NULL у своих), `tasks` (`status`, `session_id`, `pending_prompt`, `summary`, `report_path`, `cost_usd`…), `events` (лента задачи), `questions` (`kind`: question/permission), `chat_messages` (`attachments` — JSON).
+`settings(key, value)`, `projects` (path — рабочая папка Claude, `chat_session_id`), `columns` (`kind`: backlog/todo/progress/waiting/done у системных, NULL у своих), `tasks` (`status`, `session_id`, `pending_prompt`, `summary`, `report_path`, `cost_usd`…), `events` (лента задачи), `questions` (`kind`: question/permission), `chats` (`title` — NULL, пока не было первого сообщения; `session_id`; `updated_at` — время последнего сообщения; id `AUTOINCREMENT`, чтобы id удалённого чата не достался новому), `chat_messages` (`chat_id`, `attachments` — JSON). `projects.chat_session_id` устарел: при старте `db._migrate_chats()` переносит старую переписку проекта (сообщения без `chat_id` и `chat_session_id`) в чат «Чат от <дата>», а вложения — из `data/uploads/<pid>/` в `data/uploads/<pid>/<chat_id>/`.
 
 Статусы задачи: `idle`, `queued`, `running`, `resume` (продолжить с `pending_prompt`), `waiting`, `done`, `error`, `interrupted`.
 
@@ -38,14 +38,15 @@
 5. Пока `_done` разбирает итог хода, задача остаётся в `orch.runs` (всё под `orch.lock`, как и `answer_question`), так что продолжение после ответа стартует только когда прошлый процесс завершён (самое позднее через `EXIT_GRACE` после `result`).
 6. Перезапуск: `POST /api/restart` (кнопка в настройках) или MCP `restart_tracker` (роли task и chat) ставят `restart.since`. С этого момента `tick()` не берёт задачи, чат отвечает 409, в `orch.state()["restart"]` видно, сколько запусков ждём. `restart.check()` в цикле оркестратора ждёт, пока опустеют `orch.runs` и `chat.runs` (не дольше `RESTART_TIMEOUT` = 10 мин, потом `kill()` — задачи уйдут в `resume`), шлёт SSE `restarting` и вызывает `restart.exit` из `main.py`. Тот запускает новый экземпляр (`python main.py --no-browser --after <pid>`, `CREATE_NEW_CONSOLE`, свёрнутое окно, по возможности вне job-объекта) и гасит старый (`srv.shutdown()` → `os._exit(0)`). Новый ждёт выхода старого, занимает порт и делает `recover()`.
 7. Обновление: `GET /api/update` (состояние), `POST /api/update/check` (проверить сейчас, синхронно), `POST /api/update` (обновить; отказ — 409 с причиной, она же в `update_error`). После pull перезапуск идёт по п. 6, плашка `#updbar` под шапкой показывает «Обновлено, перезапуск после завершения текущих задач…»; новая страница грузится по смене `boot_id`, миграции БД применяет `db.py` при старте. Кнопка «Позже» прячет плашку до следующего `origin/main` (`localStorage.updHidden`).
-8. Изменения уходят в браузер через `GET /api/events` (SSE), клиент перечитывает нужные данные. Сервер слушает одна вкладка (держит Web Lock `cp-events`) и пересылает события остальным через `BroadcastChannel`. Иначе каждая вкладка держала бы своё соединение, а по HTTP/1.1 их ~6 на хост. Если очередь клиента в `Hub` переполнилась, `/api/events` обрывает поток. После (пере)подключения все вкладки делают `resync(true)`. Первое событие потока — `hello` с `boot_id` (он же есть в `/api/state`); если он отличается от запомненного при загрузке, вкладка делает `location.reload()`. Пока связи нет, висит плашка `#offline` («Трекер перезапускается…» или «Нет связи…»). Видимая вкладка сверяется с сервером раз в 20 с и при фокусе. В `app.js` ответы `loadBoard/loadState/refreshTask/renderQuestions` проходят через `fresh(key)`: ответ, после которого ушёл более новый запрос того же вида, отбрасывается. Пока открыт не «Доска», события доску не перечитывают, поэтому `setView("board")` загружает её заново.
+8. Чат: `GET/POST /api/projects/<pid>/chats` (список с флагом `running` / новый), `PATCH/DELETE /api/chats/<id>` (переименовать / удалить), `GET/POST /api/chats/<id>/messages` (история / отправить), `POST /api/chats/<id>/stop`, файл вложения — `GET /api/chat/<message_id>/files/<n>`. В браузере открыт один чат (`S.chat`), список — `S.chats`; событие `chat` применяется только к открытому чату с тем же `chat_id`, `chats` перечитывает список. Последний открытый чат проекта — `localStorage` `chat.<pid>`.
+9. Изменения уходят в браузер через `GET /api/events` (SSE), клиент перечитывает нужные данные. Сервер слушает одна вкладка (держит Web Lock `cp-events`) и пересылает события остальным через `BroadcastChannel`. Иначе каждая вкладка держала бы своё соединение, а по HTTP/1.1 их ~6 на хост. Если очередь клиента в `Hub` переполнилась, `/api/events` обрывает поток. После (пере)подключения все вкладки делают `resync(true)`. Первое событие потока — `hello` с `boot_id` (он же есть в `/api/state`); если он отличается от запомненного при загрузке, вкладка делает `location.reload()`. Пока связи нет, висит плашка `#offline` («Трекер перезапускается…» или «Нет связи…»). Видимая вкладка сверяется с сервером раз в 20 с и при фокусе. В `app.js` ответы `loadBoard/loadState/refreshTask/renderQuestions/loadChats/openChat` проходят через `fresh(key)`: ответ, после которого ушёл более новый запрос того же вида, отбрасывается. Пока открыт не «Доска», события доску не перечитывают, поэтому `setView("board")` загружает её заново.
 
 Где что лежит (`data/` в `.gitignore`):
 - `data/tracker.db` — база;
 - `data/reports/task-<id>.md` — отчёты (прошлый отчёт сворачивается в `<details>`);
-- `data/runs/task-<id>.jsonl`, `chat-<pid>.jsonl` — сырые логи stream-json;
+- `data/runs/task-<id>.jsonl`, `chat-<pid>-<chat_id>.jsonl` — сырые логи stream-json;
 - `data/runs/mcp/` — MCP-конфиги запусков;
-- `data/uploads/<project_id>/` — вложения чата;
+- `data/uploads/<project_id>/<chat_id>/` — вложения чата (удаляются вместе с чатом или проектом);
 - `data/restart.log` — журнал перезапусков (кто запросил, когда, pid старого и нового экземпляра, ошибки) и обновлений (`запрошен (обновление <старый> -> <новый>)`).
 
 Транскрипты сессий — у самого Claude Code в `~/.claude/projects/<папка>/<session_id>.jsonl` (`pipeline.transcript_path`).
