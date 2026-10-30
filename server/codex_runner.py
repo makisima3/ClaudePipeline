@@ -71,7 +71,7 @@ class Rpc:
         for reader in self.readers:
             reader.start()
         try:
-            self.call("initialize", {"clientInfo": {"name": "claudepipeline", "version": "1.0"},
+            self.call("initialize", {"clientInfo": {"name": "agentpipeline", "version": "1.0"},
                                      "capabilities": {"experimentalApi": True}}, timeout=30)
             self.send({"method": "initialized", "params": {}})
         except BaseException:

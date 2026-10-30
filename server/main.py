@@ -1,4 +1,4 @@
-"""ClaudePipeline: локальный сервер трекера. Запуск: python server/main.py"""
+"""AgentPipeline: локальный сервер трекера. Запуск: python server/main.py"""
 import base64
 import binascii
 import json
@@ -703,7 +703,7 @@ def main():
     after = int(sys.argv[sys.argv.index("--after") + 1]) if "--after" in sys.argv else None
     if os.name == "nt":
         import ctypes
-        ctypes.windll.kernel32.SetConsoleTitleW("ClaudePipeline — " + runtime.NAME)
+        ctypes.windll.kernel32.SetConsoleTitleW("AgentPipeline — " + runtime.NAME)
     try:
         srv = bind(after)
     except OSError as e:
@@ -718,7 +718,7 @@ def main():
     url = f"http://127.0.0.1:{PORT}"
     if after:
         pl.log_restart(f"новый экземпляр запущен (pid {os.getpid()}) после pid {after}")
-    print(f"ClaudePipeline запущен: {url}  (Ctrl+C — остановить)")
+    print(f"AgentPipeline запущен: {url}  (Ctrl+C — остановить)")
     if "--no-browser" not in sys.argv:
         webbrowser.open(url)
 

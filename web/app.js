@@ -1,4 +1,4 @@
-// ClaudePipeline — клиент трекера (без фреймворков).
+// AgentPipeline — клиент трекера (без фреймворков).
 const $ = s => document.querySelector(s);
 const ls = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -68,9 +68,9 @@ async function loadState() {
     MODELS = [["", "по умолчанию"], ...st.agent_info.models.filter(m => !m.hidden).map(m => [m.model || m.id, m.displayName || m.model || m.id])];
   }
   EV_NAMES.text = "Агент";  // история может содержать ответы обоих исполнителей
-  document.title = "ClaudePipeline — " + (st.agent_name || "Claude");
+  document.title = "AgentPipeline — " + (st.agent_name || "Claude");
   const logo = document.querySelector(".logo");
-  if (logo) logo.innerHTML = '<span class="mark">≡</span>ClaudePipeline · ' + esc(st.agent_name || "Claude");
+  if (logo) logo.innerHTML = '<span class="mark">≡</span>AgentPipeline · ' + esc(st.agent_name || "Claude");
   if (!project() && S.state.projects.length) S.projectId = S.state.projects[0].id;
   renderHeader();
 }
@@ -904,7 +904,7 @@ function onEvent(m) {
 // которых свой EventSource, быстро их съедают. Сервер слушает вкладка, взявшая Web Lock, остальным пересылает
 // события через BroadcastChannel. Закрылась она — замок переходит к следующей.
 function connect() {
-  const bc = window.BroadcastChannel && navigator.locks ? new BroadcastChannel("cp-events") : null;
+  const bc = window.BroadcastChannel && navigator.locks ? new BroadcastChannel("agentpipeline-events") : null;
   const listen = () => {
     const es = new EventSource("/api/events");
     es.onmessage = e => { const m = JSON.parse(e.data); onEvent(m); bc?.postMessage(m); };
@@ -917,7 +917,7 @@ function connect() {
   };
   if (!bc) return listen();
   bc.onmessage = e => onEvent(e.data);
-  navigator.locks.request("cp-events", () => { listen(); return new Promise(() => { }); });
+  navigator.locks.request("agentpipeline-events", () => { listen(); return new Promise(() => { }); });
 }
 
 // подстраховка: видимая вкладка сверяется с сервером раз в 20 с и сразу, когда на неё вернулись
