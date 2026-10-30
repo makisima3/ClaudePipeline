@@ -23,6 +23,7 @@ import db
 import pipeline as pl
 from runner import PORT, NO_WINDOW
 from updater import updater
+from git_readiness import check as check_git_readiness
 
 WEB = db.ROOT / "web"
 ROUTES = []
@@ -108,6 +109,16 @@ def api_settings(h, body, query):
 
 
 # ---------------- проекты и колонки ----------------
+@route("GET", r"/api/projects/(\d+)/git-readiness")
+def api_git_readiness(h, body, query, pid):
+    p = db.one("SELECT path FROM projects WHERE id=?", (pid,))
+    need(p)
+    mode = query.get("mode", [db.get_setting("git_mode")])[0]
+    auth = query.get("auth", ["existing"])[0]
+    need(mode in pl.GIT_MODES and auth in ("existing", "gh"), "Неизвестный режим проверки Git", 400)
+    return check_git_readiness(p["path"], mode, auth)
+
+
 @route("POST", "/api/projects")
 def api_project_create(h, body, query):
     name, path = (body.get("name") or "").strip(), (body.get("path") or "").strip().strip('"')

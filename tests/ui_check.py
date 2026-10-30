@@ -14,6 +14,17 @@ def main():
     if not edge.exists():
         raise SystemExit("Для этой необязательной проверки нужен Microsoft Edge")
     root = fixture.SANDBOX
+    git_calls = []
+    original_git_check = fixture.main.check_git_readiness
+
+    def git_check(path, mode, auth):
+        git_calls.append((mode, auth))
+        missing = mode == "commit_push" and auth == "gh"
+        return {"status": "needs_setup" if missing else "local_ready", "write_access": "not_checked", "checks": [
+            {"key": "auth", "status": "error" if missing else "ok", "message": "gh не найден в PATH" if missing else "Локальная проверка без push"}]}
+
+    fixture.main.check_git_readiness = git_check
+    fixture.db.set_setting("git_mode", "commit_push")
     fixture.cr.INFO["models"] = [{"model": "gpt-test", "displayName": "Codex Test", "isDefault": True, "supportedReasoningEfforts": [{"reasoningEffort": "high"}]},
                                 {"model": "gpt-other", "displayName": "Other", "supportedReasoningEfforts": [{"reasoningEffort": "low"}]}]
     p = root / "web/index.html"
@@ -27,7 +38,7 @@ window.addEventListener('unhandledrejection', e => window.__errors.push(String(e
 window.EventSource = class { static CLOSED = 2; };
 setInterval(() => {
  document.body.setAttribute('data-probe', JSON.stringify({errors:window.__errors, width:innerWidth,
- overflow:document.documentElement.scrollWidth>innerWidth, loaded:!!document.querySelector('option[value="gpt-test"]')}));
+ overflow:document.documentElement.scrollWidth>innerWidth, loaded:!!document.querySelector('option[value="gpt-test"]') && document.querySelector('#git-result')?.textContent.includes('Локальная проверка без push')}));
 }, 200);
 </script>'''
     p.write_text(s.replace('<script src="/app.js">', probe + '<script src="/app.js">'), encoding="utf-8")
@@ -53,6 +64,26 @@ setInterval(() => {
  }
  const efforts=await call('Runtime.evaluate',{expression:'JSON.stringify({first:effortList("gpt-test"),other:effortList("gpt-other")})',returnByValue:true});
  state.efforts=JSON.parse(efforts.result.value);
+ const evaluate=async expression=>(await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true})).result.value;
+ const waitFor=async expression=>{for(let n=0;n<60;n++){if(await evaluate(expression))return;await new Promise(r=>setTimeout(r,100));}throw new Error('UI timeout: '+expression)};
+ const gitMode=async value=>{await evaluate(`App.setSetting('git_mode','${value}')`)};
+ state.gitAuto=await evaluate('document.querySelector("#git-result").textContent.includes("Локальные предпосылки настроены")');
+ await gitMode('off');
+ state.gitOff=await evaluate('!document.querySelector("#git-check") && document.querySelector("#git-settings").textContent.includes("Git выключен")');
+ await gitMode('commit');
+ await evaluate('App.checkGitReadiness()');
+ state.gitCommit=await evaluate('!document.querySelector("#git-auth") && document.querySelector("#git-result").textContent.includes("Локальная проверка без push")');
+ await gitMode('commit_push');
+ await waitFor('document.querySelector("#git-result").textContent.includes("Локальная проверка без push")');
+ await evaluate('document.querySelector("#git-auth").value="gh"; App.gitAuthChanged("gh")');
+ await waitFor('document.querySelector("#git-result").textContent.includes("gh не найден")');
+ state.gitMissingGh=await evaluate('document.querySelector("#git-result").textContent.includes("Нужна настройка")');
+ await evaluate('document.querySelector("#git-auth").value="existing"; App.gitAuthChanged("existing")');
+ await waitFor('document.querySelector("#git-result").textContent.includes("Локальная проверка без push")');
+ await evaluate('App.openGitSettings()');
+ await waitFor('document.querySelector("#git-result").textContent.includes("Локальная проверка без push")');
+ state.gitReopen=await evaluate('document.querySelector("#git-settings").getBoundingClientRect().top >= -2');
+ state.overflow=await evaluate('document.documentElement.scrollWidth>innerWidth');
  const shot=await call('Page.captureScreenshot',{format:'png'});
  fs.writeFileSync(screenshot,Buffer.from(shot.data,'base64'));
  console.log(JSON.stringify(state));await call('Browser.close');ws.close();
@@ -83,7 +114,11 @@ setInterval(() => {
             assert not state["overflow"], state
             assert state["width"] == width, state
             assert state["efforts"]["first"][-1][0] == "high" and state["efforts"]["other"][-1][0] == "low", state
+            assert all(state[k] for k in ("gitAuto", "gitOff", "gitCommit", "gitMissingGh", "gitReopen")), state
+        assert ("commit", "existing") in git_calls and ("commit_push", "gh") in git_calls, git_calls
+        assert not any(mode == "off" for mode, auth in git_calls), git_calls
     finally:
+        fixture.main.check_git_readiness = original_git_check
         srv.shutdown()
         srv.server_close()
 

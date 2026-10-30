@@ -259,6 +259,14 @@ a.tref:hover { text-decoration: underline; }
 .md p:first-child { margin-top: 0; } .md p:last-child { margin-bottom: 0; }
 .msg .md ul, .msg .md ol { padding-left: 20px; margin: 4px 0; }
 
+.git-readiness { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; }
+.git-readiness p:first-child { margin-top: 0; }
+.git-readiness ul { padding-left: 20px; }
+.git-readiness li { margin: 8px 0; }
+.git-readiness .git-error > b { color: var(--err); }
+.git-readiness .git-warning > b { color: var(--warn); }
+#git-settings { scroll-margin-top: 12px; }
+
 @media (max-width: 900px) {
   .chat { position: fixed; inset: 0; width: auto; z-index: 5; }
   .task-grid { grid-template-columns: 1fr; }

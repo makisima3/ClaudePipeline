@@ -452,12 +452,13 @@ function renderSettings() {
         <div class="grow"><label>Effort для задач</label><select onchange="App.setSetting('effort', this.value)">${opts(effortList(s.model, true), s.effort)}</select></div>
         <div class="grow"><label>Модель для чата и импорта</label><select onchange="App.setSetting('chat_model', this.value)">${opts(MODELS, s.chat_model)}</select></div>
       </div>
-      <label>Git в конце задачи (если папка проекта — git-репозиторий)</label>
+      <div id="git-settings"><label>Git в конце задачи (если папка проекта — git-репозиторий)</label>
       <select onchange="App.setSetting('git_mode', this.value)">${opts([
         ["commit_push", "Коммит и push — по коммиту на задачу, push без force"],
         ["commit", "Только коммит — push делаю сам"],
         ["off", "Ничего — агент git не трогает"]], s.git_mode)}</select>
-      <div class="hint">Агент коммитит только изменения своей задачи с сообщением «#id заголовок», чужие незакоммиченные правки не трогает. В папке самого трекера неотправленные коммиты блокируют его обновление с GitHub.</div>
+      <div class="hint">Общий режим для всех проектов. Агент коммитит только изменения своей задачи с сообщением «#id заголовок». Доступ к репозиторию трекера и к репозиториям проектов настраивается отдельно. В папке трекера неотправленные коммиты блокируют его обновление.</div>
+      ${gitReadinessPanel(p, s.git_mode)}</div>
       <label>Дополнительные указания всем агентам задач</label>
       <textarea rows="4" placeholder="Например: «Код Unity проверяй через UnityMCP»" onchange="App.setSetting('extra_prompt', this.value)">${esc(s.extra_prompt)}</textarea>
       ${+s.pause_until * 1000 > Date.now() ? `<p>Сейчас пауза по лимиту. <button onclick="App.clearPause()">Снять паузу</button></p>` : ""}
@@ -479,13 +480,61 @@ function renderSettings() {
     </div>` : ""}
   </div>`;
   renderUpdateSection();
+  if (s.git_mode === "commit_push" && p) checkGitReadiness();
+}
+
+function gitReadinessPanel(p, mode) {
+  if (mode === "off") return `<p class="hint">Git выключен. Для обычной работы трекера авторизация GitHub не нужна.</p>`;
+  if (!p) return `<p class="hint">Добавь и выбери проект, чтобы проверить его Git-репозиторий.</p>`;
+  const auth = ls.get(`gitAuth.${p.id}`, "existing");
+  return `<div class="git-readiness">
+    <p><b>Проверка проекта «${esc(p.name)}»</b></p>
+    ${mode === "commit_push" ? `<label for="git-auth">Способ доступа для проверки</label>
+      <select id="git-auth" onchange="App.gitAuthChanged(this.value)">${opts([
+        ["existing", "Существующий SSH / HTTPS / менеджер учётных данных"],
+        ["gh", "GitHub CLI (gh) для HTTPS"]], auth)}</select>` : `<p class="hint">Локальным коммитам не нужны remote и вход в GitHub.</p>`}
+    <p><button id="git-check" onclick="App.checkGitReadiness()">Проверить готовность</button></p>
+    <div id="git-result" role="status" aria-live="polite"></div>
+    <p class="hint">Проверка не создаёт коммиты, не делает push и не меняет Git-конфигурацию.
+      ${mode === "commit_push" ? "Локальные настройки и вход gh не гарантируют право записи: доступ, защита ветки и ошибки сети выяснятся при реальном push. Его отказ агент сохранит в отчёте без force/reset/rebase." : ""}
+      Инструкция: README → «Git и GitHub: настройка проектов».</p>
+  </div>`;
+}
+
+async function checkGitReadiness() {
+  const box = $("#git-result"), button = $("#git-check"), pid = S.projectId, mode = S.state.settings.git_mode;
+  if (!box || !pid || mode === "off") return;
+  const ok = fresh("git-readiness"), auth = $("#git-auth")?.value || "existing";
+  button.disabled = true;
+  box.textContent = "Проверяю…";
+  try {
+    const r = await api("GET", `/api/projects/${pid}/git-readiness?mode=${encodeURIComponent(mode)}&auth=${encodeURIComponent(auth)}`);
+    if (!ok() || box !== $("#git-result") || pid !== S.projectId) return;
+    const title = {needs_setup: "Нужна настройка", review: "Есть пункты для проверки", local_ready: "Локальные предпосылки настроены"}[r.status];
+    box.innerHTML = `<b>${esc(title)}</b><ul>${r.checks.map(c => `<li class="git-${esc(c.status)}"><b>${{ok: "✓", warning: "Проверь:", error: "Нужно:"}[c.status]}</b> ${esc(c.message)}</li>`).join("")}</ul>`;
+  } catch (e) {
+    if (ok() && box === $("#git-result")) box.textContent = "Не удалось проверить Git. Повтори проверку после восстановления связи с трекером.";
+  } finally {
+    if (ok()) button.disabled = false;
+  }
+}
+
+function gitAuthChanged(value) {
+  ls.set(`gitAuth.${S.projectId}`, value);
+  checkGitReadiness();
+}
+
+async function openGitSettings(pid = S.projectId) {
+  if (pid && pid !== S.projectId) await selectProject(pid);
+  setView("settings");
+  $("#git-settings")?.scrollIntoView({block: "start"});
 }
 
 async function setSetting(k, v) {
   const changes = { [k]: v };
   if (k === "model" && S.state.agent === "codex" && !effortList(v, true).some(([e]) => e === S.state.settings.effort)) changes.effort = "";
   await api("POST", "/api/settings", changes); await loadState();
-  if (S.view === "settings" && k === "model") renderSettings();
+  if (S.view === "settings" && (k === "model" || k === "git_mode")) renderSettings();
   toast("Сохранено");
 }
 async function restartTracker() {
@@ -974,6 +1023,7 @@ window.App = {
   renderRefs, linkSearch, linkPick, unlinkTask,
   answer, answerText, toggleAnswered, setSetting, clearPause, restartTracker, addColumn, columnMenu,
   checkUpdate, applyUpdate, toggleUpdList, hideUpdate,
+  checkGitReadiness, gitAuthChanged, openGitSettings,
   importDialog, importParse, importCommit, toggleChat, chatSend, chatStop, chatNew, toggleChatList, openChat, renameChat, retitleChat, deleteChat, removeAtt, togglePipeline,
 };
 

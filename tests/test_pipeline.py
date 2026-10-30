@@ -333,6 +333,22 @@ class PipelineTests(unittest.TestCase):
         run._finish()
         self.assertEqual(len(result), 1)
 
+    def test_git_readiness_endpoint_is_project_scoped_and_validated(self):
+        expected = {"status": "local_ready", "checks": [], "write_access": "not_checked"}
+        with patch.object(main, "check_git_readiness", return_value=expected) as check:
+            self.assertEqual(main.api_git_readiness(None, None, {"auth": ["gh"]}, self.pid), expected)
+            check.assert_called_once_with(str(SANDBOX), "commit_push", "gh")
+            db.set_setting("git_mode", "off")
+            main.api_git_readiness(None, None, {}, self.pid)
+            check.assert_called_with(str(SANDBOX), "off", "existing")
+            for query in ({"mode": ["bad"]}, {"auth": ["bad"]}):
+                with self.assertRaises(main.HttpError) as err:
+                    main.api_git_readiness(None, None, query, self.pid)
+                self.assertEqual(err.exception.code, 400)
+            with self.assertRaises(main.HttpError) as err:
+                main.api_git_readiness(None, None, {}, 999999)
+            self.assertEqual(err.exception.code, 404)
+
     def test_codex_events_and_once_callback(self):
         result, text, tools = [], [], []
         run = cr.CodexRun(key="events", cwd=SANDBOX, prompt="", session_id="s", resume=True, role="task", system_prompt="",
