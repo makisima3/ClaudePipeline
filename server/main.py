@@ -99,6 +99,8 @@ def api_update(h, body, query):
 
 @route("POST", "/api/settings")
 def api_settings(h, body, query):
+    if "onboarding_status" in body:
+        need(body["onboarding_status"] in ("completed", "skipped"), "Мастер можно завершить или пропустить", 400)
     for k, v in body.items():
         if k in db.DEFAULT_SETTINGS and k not in ("pipeline_enabled", "pause_until", "telegram_auth", "telegram_error", "telegram_test_at"):
             db.set_setting(k, v)

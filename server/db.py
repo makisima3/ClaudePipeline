@@ -86,6 +86,7 @@ DEFAULT_SETTINGS = {
     "pause_estimated": "0",
     "update_check_minutes": "60",     # проверка обновлений на GitHub, 0 — только вручную
     "git_mode": "commit_push",        # off | commit | commit_push — что агент делает с git в конце задачи
+    "onboarding_status": "pending",   # pending | completed | skipped — общий выбор всей установки
     "telegram_auth": "unconfigured",  # готовность подтверждается браузером, отдельно от выбора устройства
     "telegram_error": "",
     "telegram_test_at": "0",

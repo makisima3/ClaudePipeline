@@ -81,6 +81,36 @@ a { color: var(--accent); }
 .grow { flex: 1; }
 .hidden { display: none !important; }
 
+/* Первое знакомство использует палитру выбранного исполнителя. */
+.welcome { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.welcome > div { display: flex; gap: 6px; flex-shrink: 0; }
+.onboarding { max-width: 680px; margin: 0 auto; padding: 24px; }
+.onboarding-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 12px; }
+.onboarding-steps { display: flex; gap: 8px; list-style: none; padding: 0; margin: 16px 0; }
+.onboarding-steps li { flex: 1; }
+.onboarding-steps button { width: 100%; text-align: left; }
+.onboarding-steps [aria-current] { border-color: var(--accent); background: var(--accent-soft); }
+.onboarding h2 { font-size: 26px; line-height: 1.2; margin: 16px 0; }
+.onboarding-body { font-size: 15px; line-height: 1.55; }
+.onboarding-status { border-left: 3px solid var(--accent); padding: 10px 14px; margin: 14px 0; background: var(--panel); }
+.onboarding-status p:first-child { margin-top: 0; }
+.onboarding-status p:last-child { margin-bottom: 0; }
+.onboarding-path { overflow-wrap: anywhere; }
+.onboarding-actions { position: sticky; bottom: 0; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--line); margin-top: 16px; padding: 12px 0; background: var(--bg); }
+.onboarding button, .welcome button { min-height: 40px; }
+.onboarding button:focus-visible, .welcome button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 600px) {
+  .welcome { align-items: flex-start; flex-direction: column; font-size: 13px; }
+  .welcome > div { flex-wrap: wrap; }
+  .onboarding { padding: 16px; }
+  .onboarding-head { align-items: flex-start; }
+  .onboarding-head span { padding-top: 6px; }
+  .onboarding-head button { max-width: 145px; }
+  .onboarding h2 { font-size: 23px; }
+  .onboarding-steps { gap: 4px; }
+  .onboarding-steps button { padding: 8px; font-size: 13px; }
+}
+
 /* ---------- header ---------- */
 header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .logo { font-weight: 700; letter-spacing: -.02em; display: flex; align-items: center; gap: 8px; white-space: nowrap; }

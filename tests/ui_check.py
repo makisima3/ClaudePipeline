@@ -54,6 +54,7 @@ setInterval(() => {
  overflow:document.documentElement.scrollWidth>innerWidth, loaded:!!document.querySelector('option[value="gpt-test"]') && document.querySelector('#git-result')?.textContent.includes('Локальная проверка без push')}));
 }, 200);
 </script>'''
+    probe = probe.replace("window.__errors = [];", "window.__sandboxPath = " + json.dumps(str(root)) + "; window.__errors = [];")
     p.write_text(s.replace('<script src="/app.js">', probe + '<script src="/app.js">'), encoding="utf-8")
     srv = fixture.main.Server(("127.0.0.1", 0), fixture.main.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -81,6 +82,7 @@ setInterval(() => {
  const evaluate=async expression=>(await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true})).result.value;
  const waitFor=async expression=>{for(let n=0;n<60;n++){if(await evaluate(expression))return;await new Promise(r=>setTimeout(r,100));}throw new Error('UI timeout: '+expression)};
  const gitMode=async value=>{await evaluate(`App.setSetting('git_mode','${value}')`)};
+ state.wizardOffer=await evaluate(`!document.querySelector('#welcome').classList.contains('hidden') === ${+width===1280}`);
  state.gitAuto=await evaluate('document.querySelector("#git-result").textContent.includes("Локальные предпосылки настроены")');
  await gitMode('off');
  state.gitOff=await evaluate('!document.querySelector("#git-check") && document.querySelector("#git-settings").textContent.includes("Git выключен")');
@@ -133,6 +135,66 @@ setInterval(() => {
  state.telegramChatSetup=await evaluate(`S.view === "settings" && S.chatOpen === ${+width>=900}`);
  await evaluate('if(S.chatOpen)App.toggleChat()');
  state.telegramOverflow=await evaluate('document.documentElement.scrollWidth>innerWidth');
+ await evaluate('App.finishOnboarding("skipped")');
+ await call('Page.reload');
+ await waitFor('S.state && document.querySelector("#view").children.length');
+ state.wizardSkip=await evaluate('S.state.settings.onboarding_status==="skipped" && document.querySelector("#welcome").classList.contains("hidden") && S.view!=="onboarding"');
+ await evaluate('App.setView("settings"); document.querySelector("#onboarding-settings button").click()');
+ await waitFor('document.querySelector("#onboarding-title")');
+ state.wizardReopen=await evaluate('S.view==="onboarding" && S.state.settings.onboarding_status==="skipped" && document.querySelector("#onboarding-title").textContent.includes("От задачи")');
+ state.wizardLayouts=true;
+ const wizardShot=async step=>{
+  state.wizardLayouts=state.wizardLayouts && await evaluate('(()=>{const b=document.querySelector(".onboarding-actions .primary").getBoundingClientRect(); return b.top>=0 && b.bottom<=innerHeight && document.documentElement.scrollWidth<=innerWidth})()');
+  await evaluate('document.querySelectorAll(".toast").forEach(e=>e.remove())');
+  const s=await call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(screenshot.replace('.png',`-wizard-${step}.png`),Buffer.from(s.data,'base64'))
+ };
+ await wizardShot(1);
+ await evaluate('document.querySelector(".onboarding-actions .ghost").click()');
+ await waitFor('document.querySelector("#git-result")?.textContent.includes("Локальные предпосылки")');
+ state.wizardStepSkip=await evaluate('document.querySelector("#onboarding-git-mode") && document.querySelector("#git-result").textContent.includes("Локальные предпосылки")');
+ await evaluate('App.setSetting("git_mode","off")');
+ state.wizardGitOff=await evaluate('!document.querySelector("#git-check") && document.querySelector(".onboarding-status").textContent.includes("Git выключен")');
+ await evaluate('App.setSetting("git_mode","commit")');
+ await waitFor('document.querySelector("#git-result")?.textContent.includes("Локальные предпосылки")');
+ await wizardShot(2);
+ await evaluate('document.querySelector(".onboarding-body > button").click()');
+ state.wizardGitShared=await evaluate('S.view==="settings" && S.state.settings.git_mode==="commit" && !!document.querySelector("#git-settings")');
+ await evaluate('App.openOnboarding(true)');
+ state.wizardReturn=await evaluate('S.view==="onboarding" && !!document.querySelector("#onboarding-git-mode")');
+ await evaluate('App.onboardingMove(2)');
+ await waitFor('document.querySelector("#onboarding-telegram")?.textContent.includes("Авторизация проверена")');
+ state.wizardTelegramReady=await evaluate('document.querySelector("#onboarding-telegram").textContent.includes("Последний успешный тест")');
+ await wizardShot(3);
+ await evaluate('document.querySelector(".onboarding-body > button").click()');
+ state.wizardTelegramShared=await evaluate('S.view==="settings" && !!document.querySelector("#telegram-settings") && document.querySelector("#onboarding-settings button").textContent.includes("Вернуться")');
+ await evaluate('App.openOnboarding(true)');
+ // Потеря авторизации и ошибка запроса: мастер не должен показывать старую готовность.
+ await evaluate('window.realFetch=window.fetch; window.fetch=(url,init)=>url==="/api/telegram"?Promise.resolve(new Response(JSON.stringify({auth:"auth_required",test_at:0}),{headers:{"Content-Type":"application/json"}})):window.realFetch(url,init); App.onboardingMove(2)');
+ await waitFor('document.querySelector("#onboarding-telegram")?.textContent.includes("Нужно войти заново")');
+ state.wizardTelegramFresh=await evaluate('!document.querySelector("#onboarding-telegram").textContent.includes("Авторизация проверена")');
+ await evaluate('window.fetch=(url,init)=>url==="/api/telegram"?Promise.reject(new Error("offline")):window.realFetch(url,init); App.onboardingMove(2)');
+ await waitFor('document.querySelector("#onboarding-telegram")?.textContent.includes("Не удалось получить")');
+ state.wizardError=await evaluate('!document.querySelector("#onboarding-telegram").textContent.includes("Авторизация проверена")');
+ await evaluate('window.fetch=window.realFetch; App.onboardingMove(0); S.state.agent="claude"; S.state.agent_name="Claude"; S.state.projects=[]; renderOnboarding()');
+ state.wizardClaudeEmpty=await evaluate('document.querySelector(".onboarding-body").textContent.includes("Вход Claude Code на этом экране не проверялся") && document.querySelector(".onboarding-body").textContent.includes("Проект ещё не создан")');
+ await evaluate('App.openOnboarding()');
+ const demoProject=await evaluate('S.projectId');
+ await evaluate('document.querySelector(".onboarding-body > button").click(); document.querySelector("#np-name").value="Первый проект из мастера"; document.querySelector("#np-path").value=window.__sandboxPath; App.createProject()');
+ await waitFor('!document.querySelector("#np-name") && document.querySelector(".onboarding-status")?.textContent.includes("Первый проект из мастера")');
+ state.wizardCreateProject=await evaluate('S.view==="onboarding" && project().path===window.__sandboxPath');
+ const wizardProject=await evaluate('S.projectId');
+ await evaluate(`App.selectProject(${demoProject})`);
+ state.wizardSelectProject=await evaluate(`S.view==="onboarding" && S.projectId===${demoProject}`);
+ await evaluate(`api('DELETE','/api/projects/${wizardProject}').then(()=>loadState())`);
+ await evaluate('App.openOnboarding(); App.onboardingMove(2); document.querySelector(".onboarding-actions .primary").click()');
+ await waitFor('S.state.settings.onboarding_status==="completed" && S.view==="board"');
+ await call('Page.reload');
+ await waitFor('S.state && document.querySelector("#view").children.length');
+ state.wizardComplete=await evaluate('S.state.settings.onboarding_status==="completed" && document.querySelector("#welcome").classList.contains("hidden") && S.view!=="onboarding"');
+ await evaluate('App.openOnboarding()');
+ state.wizardCompleteReopen=await evaluate('S.view==="onboarding" && S.state.settings.onboarding_status==="completed"');
+ state.wizardOverflow=await evaluate('document.documentElement.scrollWidth>innerWidth');
+ state.errors=await evaluate('window.__errors');
  state.overflow=await evaluate('document.documentElement.scrollWidth>innerWidth');
  const shot=await call('Page.captureScreenshot',{format:'png'});
  fs.writeFileSync(screenshot,Buffer.from(shot.data,'base64'));
@@ -141,6 +203,7 @@ setInterval(() => {
 ''', encoding="utf-8")
     try:
         for width, height in ((1280, 900), (390, 844)):
+            fixture.db.set_setting("git_mode", "commit_push")
             fixture.db.set_setting("telegram_auth", "unconfigured")
             fixture.db.set_setting("telegram_test_at", "0")
             fixture.db.ex("DELETE FROM tasks WHERE title='Задача из интерфейса'")
@@ -172,6 +235,9 @@ setInterval(() => {
             assert all(state[k] for k in ("telegramInitial", "telegramNotReady", "telegramRemembered", "telegramReady", "telegramFormDefault",
                                          "telegramCreated", "telegramIndependent", "telegramExplicit", "telegramDeliveryError", "telegramRetried", "telegramChatControl", "telegramChatSetup")), state
             assert not state["telegramOverflow"], state
+            assert all(state[k] for k in ("wizardOffer", "wizardSkip", "wizardReopen", "wizardStepSkip", "wizardGitOff", "wizardGitShared", "wizardReturn", "wizardLayouts",
+                                         "wizardTelegramReady", "wizardTelegramShared", "wizardTelegramFresh", "wizardError", "wizardClaudeEmpty", "wizardCreateProject", "wizardSelectProject", "wizardComplete", "wizardCompleteReopen")), state
+            assert not state["wizardOverflow"], state
         assert ("commit", "existing") in git_calls and ("commit_push", "gh") in git_calls, git_calls
         assert not any(mode == "off" for mode, auth in git_calls), git_calls
     finally:

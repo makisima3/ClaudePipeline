@@ -101,7 +101,9 @@ async function loadState() {
   if (logo) logo.innerHTML = '<span class="mark">≡</span>AgentPipeline · ' + esc(st.agent_name || "Claude");
   if (!project() && S.state.projects.length) S.projectId = S.state.projects[0].id;
   renderHeader();
+  renderWelcome();
   if (telegramChanged && S.view === "settings") renderTelegramSettings();
+  if (telegramChanged && S.view === "onboarding" && onboardingStep === 2) refreshOnboardingTelegram();
 }
 
 async function loadBoard() {
@@ -174,9 +176,11 @@ function renderHeader() {
 
 function render() {
   renderHeader();
-  $("#chat").classList.toggle("hidden", !S.chatOpen || !S.projectId);
+  renderWelcome();
+  $("#chat").classList.toggle("hidden", !S.chatOpen || !S.projectId || S.view === "onboarding");
   if (S.view === "board") renderBoard();
   else if (S.view === "questions") renderQuestions();
+  else if (S.view === "onboarding") renderOnboarding();
   else renderSettings();
 }
 
@@ -490,11 +494,98 @@ async function answer(qid, text) {
 }
 function answerText(qid) { const v = $(`#ans-${qid}`).value.trim(); if (v) answer(qid, v); }
 
+// ---------------- первое знакомство ----------------
+let onboardingStep = 0, onboardingActive = false;
+
+function renderWelcome() {
+  const box = $("#welcome"), pending = S.state?.settings.onboarding_status === "pending";
+  box.classList.toggle("hidden", !pending || onboardingActive || S.view === "onboarding");
+  box.innerHTML = pending ? `<span><b>Первый запуск?</b> Три коротких шага: работа с задачами, Git и Telegram. Интеграции необязательны.</span>
+    <div><button onclick="App.openOnboarding()">Открыть мастер</button><button class="ghost" onclick="App.finishOnboarding('skipped')">Пропустить мастер</button></div>` : "";
+}
+
+async function openOnboarding(resume = false) {
+  await loadState();
+  if (!resume) onboardingStep = 0;
+  onboardingActive = true;
+  setView("onboarding");
+}
+
+function onboardingMove(step) {
+  onboardingStep = Math.max(0, Math.min(2, step));
+  renderOnboarding();
+}
+
+async function finishOnboarding(status) {
+  await api("POST", "/api/settings", {onboarding_status: status});
+  onboardingActive = false;
+  await loadState();
+  setView("board");
+  toast(status === "completed" ? "Знакомство завершено. Мастер доступен в настройках." : "Мастер пропущен. Вернуться можно из настроек.");
+}
+
+function renderOnboarding() {
+  const p = project(), s = S.state.settings, step = onboardingStep;
+  const titles = ["От задачи до результата", "Сохраняй изменения в Git", "Получай результаты в Telegram"];
+  const codex = S.state.agent === "codex";
+  const intro = `<p>Проект — папка на ПК с трекером. Создай задачу с ожидаемым результатом, перенеси в «В работу» и включи пайплайн в шапке.</p>
+    <p>Вопросы агента — во «Вопросах»: ответь, чтобы продолжить. Итог и отчёт — в карточке «Готово».</p>
+    <div class="onboarding-status"><b>Исполнитель: ${esc(S.state.agent_name)}</b><br>${codex
+      ? (S.state.agent_info?.version ? `Codex CLI ${esc(S.state.agent_info.version)}: вход ChatGPT проверен при запуске сервера.` : "Вход ChatGPT на этом экране не проверялся.")
+      : "Вход Claude Code на этом экране не проверялся."}
+      <p class="hint">${codex ? "Codex CLI ≥ 0.166.0: codex login → ChatGPT." : "Claude Code: вход по подписке через claude."} Вход — на ПК с трекером; API-ключ не нужен. Исполнителя выбирает файл запуска.</p>
+      ${p ? `Выбран проект «${esc(p.name)}»: <span class="onboarding-path">${esc(p.path)}</span>` : "Проект ещё не создан."}</div>
+    <button onclick="App.newProject()">${p ? "Добавить проект" : "Создать первый проект"}</button>`;
+  const git = `<p>Коммит сохраняет изменения задачи в истории проекта. Push отправляет коммиты в удалённый репозиторий, например на GitHub.</p>
+    <label for="onboarding-git-mode">Общий режим для проектов</label>
+    <select id="onboarding-git-mode" onchange="App.setSetting('git_mode', this.value)">${opts([
+      ["off", "Без Git"], ["commit", "Только коммит"], ["commit_push", "Коммит и push"]], s.git_mode)}</select>
+    <div class="onboarding-status">${gitReadinessPanel(p, s.git_mode, true)}</div>
+    <p class="hint">GitHub CLI необязателен. Существующий SSH/HTTPS-доступ сохраняется. Проверка не делает push и не подтверждает право записи.</p>
+    <button onclick="App.openGitSettings()">Настройка и проверка Git</button>`;
+  const telegram = `<p>Итог и материалы задачи придут в «Избранное» твоего аккаунта. Для этого на ПК с трекером нужны дополнительные Playwright и Chromium, вход по QR и тестовое сообщение.</p>
+    <div class="onboarding-status" id="onboarding-telegram" role="status">Читаю состояние подключения…</div>
+    <p>Переключатель «Результаты в Telegram» запоминается на устройстве: на телефоне по умолчанию включён, на ПК выключен. Он задаёт начальный флаг новым задачам; в каждой карточке флаг можно изменить отдельно.</p>
+    <p class="hint">Telegram необязателен. Установка компонентов, вход, проверка сессии и тест в «Избранное» доступны в общих настройках.</p>
+    <button onclick="App.openTelegramSettings()">Настроить Telegram</button>`;
+  $("#view").innerHTML = `<section class="onboarding">
+    <div class="onboarding-head"><span>Первое знакомство · ${step + 1} из 3</span><button class="ghost" onclick="App.finishOnboarding('skipped')">Пропустить мастер</button></div>
+    <ol class="onboarding-steps" aria-label="Шаги мастера">${["Трекер", "Git", "Telegram"].map((t, i) => `<li><button ${i === step ? 'aria-current="step"' : ""} onclick="App.onboardingMove(${i})">${i + 1}. ${t}</button></li>`).join("")}</ol>
+    <h2 id="onboarding-title" tabindex="-1">${titles[step]}</h2>
+    <div class="onboarding-body">${[intro, git, telegram][step]}</div>
+    <div class="onboarding-actions">${step ? `<button onclick="App.onboardingMove(${step - 1})">Назад</button>` : ""}
+      <button class="ghost" onclick="${step < 2 ? `App.onboardingMove(${step + 1})` : "App.finishOnboarding('skipped')"}">Пропустить шаг</button>
+      <button class="primary" onclick="${step < 2 ? `App.onboardingMove(${step + 1})` : "App.finishOnboarding('completed')"}">${step < 2 ? "Далее" : "Завершить"}</button></div>
+    <p class="hint">Можно работать сразу, а к настройкам вернуться позже.</p>
+  </section>`;
+  $("#view").scrollTop = 0;
+  $("#onboarding-title").focus({preventScroll: true});
+  if (step === 1) checkGitReadiness();
+  if (step === 2) refreshOnboardingTelegram();
+}
+
+async function refreshOnboardingTelegram() {
+  const box = $("#onboarding-telegram");
+  if (!box) return;
+  try {
+    const t = await api("GET", "/api/telegram");
+    if (box !== $("#onboarding-telegram")) return;
+    const names = {ready: "Авторизация проверена сервисом", unconfigured: "Не подключён", unknown: "Нужна проверка сессии",
+      checking: "Проверяем сессию…", login: "Ожидаем вход…", auth_required: "Нужно войти заново", error: "Нужна проверка подключения", uncertain: "Проверь тестовое сообщение в Избранном"};
+    box.textContent = `${names[t.auth] || "Состояние неизвестно"}. ${t.test_at ? `Последний успешный тест: ${fmtTime(t.test_at)}.` : "Успешного теста ещё не было."}`;
+  } catch {
+    if (box === $("#onboarding-telegram")) box.textContent = "Не удалось получить состояние. Открой настройки и повтори проверку сессии.";
+  }
+}
+
 // ---------------- настройки ----------------
 function renderSettings() {
   const s = S.state.settings, p = project();
   $("#view").innerHTML = `<div class="pad">
     <h2>Настройки · ${esc(S.state.agent_name)}</h2>
+    <div class="section" id="onboarding-settings"><h3>Первое знакомство</h3>
+      <p class="hint">Работа с задачами и необязательные интеграции. Просмотр шагов не подключает сервисы.</p>
+      <button onclick="App.openOnboarding(${onboardingActive})">${onboardingActive ? "Вернуться к мастеру" : "Открыть мастер"}</button></div>
     <div class="section" id="telegram-settings"></div>
     <div class="section"><h3>Выключение пайплайна</h3>
       <label class="radio"><input type="radio" name="stop" value="graceful" ${s.stop_mode === "graceful" ? "checked" : ""} onchange="App.setSetting('stop_mode','graceful')">
@@ -599,10 +690,12 @@ function openTelegramSettings() {
   refreshTelegram();
 }
 
-function gitReadinessPanel(p, mode) {
+function gitReadinessPanel(p, mode, compact = false) {
   if (mode === "off") return `<p class="hint">Git выключен. Для обычной работы трекера авторизация GitHub не нужна.</p>`;
   if (!p) return `<p class="hint">Добавь и выбери проект, чтобы проверить его Git-репозиторий.</p>`;
   const auth = ls.get(`gitAuth.${p.id}`, "existing");
+  if (compact) return `<p>Проект «${esc(p.name)}»</p><button id="git-check" onclick="App.checkGitReadiness()">Проверить ещё раз</button>
+    <div id="git-result" data-compact="true" role="status" aria-live="polite">Проверка ещё не выполнена.</div>`;
   return `<div class="git-readiness">
     <p><b>Проверка проекта «${esc(p.name)}»</b></p>
     ${mode === "commit_push" ? `<label for="git-auth">Способ доступа для проверки</label>
@@ -620,14 +713,15 @@ function gitReadinessPanel(p, mode) {
 async function checkGitReadiness() {
   const box = $("#git-result"), button = $("#git-check"), pid = S.projectId, mode = S.state.settings.git_mode;
   if (!box || !pid || mode === "off") return;
-  const ok = fresh("git-readiness"), auth = $("#git-auth")?.value || "existing";
+  const ok = fresh("git-readiness"), auth = $("#git-auth")?.value || ls.get(`gitAuth.${pid}`, "existing");
   button.disabled = true;
   box.textContent = "Проверяю…";
   try {
     const r = await api("GET", `/api/projects/${pid}/git-readiness?mode=${encodeURIComponent(mode)}&auth=${encodeURIComponent(auth)}`);
     if (!ok() || box !== $("#git-result") || pid !== S.projectId) return;
     const title = {needs_setup: "Нужна настройка", review: "Есть пункты для проверки", local_ready: "Локальные предпосылки настроены"}[r.status];
-    box.innerHTML = `<b>${esc(title)}</b><ul>${r.checks.map(c => `<li class="git-${esc(c.status)}"><b>${{ok: "✓", warning: "Проверь:", error: "Нужно:"}[c.status]}</b> ${esc(c.message)}</li>`).join("")}</ul>`;
+    box.innerHTML = `<b>${esc(title || "Состояние неизвестно")}</b>` + (box.dataset.compact ? `<p class="hint">${esc(r.checks.find(c => c.status !== "ok")?.message || "Проверка локальных условий завершена.")}</p>`
+      : `<ul>${r.checks.map(c => `<li class="git-${esc(c.status)}"><b>${{ok: "✓", warning: "Проверь:", error: "Нужно:"}[c.status]}</b> ${esc(c.message)}</li>`).join("")}</ul>`);
   } catch (e) {
     if (ok() && box === $("#git-result")) box.textContent = "Не удалось проверить Git. Повтори проверку после восстановления связи с трекером.";
   } finally {
@@ -642,6 +736,7 @@ function gitAuthChanged(value) {
 
 async function openGitSettings(pid = S.projectId) {
   if (pid && pid !== S.projectId) await selectProject(pid);
+  if (S.chatOpen && matchMedia("(max-width: 900px)").matches) toggleChat();
   setView("settings");
   $("#git-settings")?.scrollIntoView({block: "start"});
 }
@@ -651,6 +746,7 @@ async function setSetting(k, v) {
   if (k === "model" && S.state.agent === "codex" && !effortList(v, true).some(([e]) => e === S.state.settings.effort)) changes.effort = "";
   await api("POST", "/api/settings", changes); await loadState();
   if (S.view === "settings" && (k === "model" || k === "git_mode")) renderSettings();
+  if (S.view === "onboarding" && k === "git_mode") renderOnboarding();
   toast("Сохранено");
 }
 async function restartTracker() {
@@ -765,7 +861,7 @@ async function createProject() {
   const p = await api("POST", "/api/projects", { name: $("#np-name").value, path: $("#np-path").value, color });
   closeModal();
   S.projectId = p.id; ls.set("project", p.id);
-  await loadState(); S.view = "board"; render(); loadBoard(); loadChat();
+  await loadState(); if (S.view !== "onboarding") S.view = "board"; render(); loadBoard(); loadChat();
 }
 
 async function updateProject(fields) { await api("PATCH", `/api/projects/${S.projectId}`, fields); await loadState(); renderSettings(); toast("Сохранено"); }
@@ -781,7 +877,7 @@ async function selectProject(id) {
   if (id !== S.projectId) clearAtts();
   S.projectId = id; ls.set("project", id);
   if (S.view === "settings") renderSettings();
-  if (S.view !== "board") { S.view = "board"; ls.set("view", "board"); }
+  if (!["board", "onboarding"].includes(S.view)) { S.view = "board"; ls.set("view", "board"); }
   render(); loadBoard(); loadChat();
 }
 
@@ -1094,7 +1190,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 window.addEventListener("focus", resyncD);
 
 // пока открыт другой вид, события доску не перечитывают — при возврате берём свежую
-function setView(v) { S.view = v; ls.set("view", v); render(); if (v === "board") loadBoard(); }
+function setView(v) { S.view = v; ls.set("view", v === "onboarding" ? "board" : v); render(); if (v === "board") loadBoard(); }
 function toggleAnswered(on) { S.showAnswered = on; renderQuestions(); }
 
 $("#chatInput").addEventListener("keydown", e => {
@@ -1136,6 +1232,7 @@ document.addEventListener("click", e => {
 });
 
 window.App = {
+  openOnboarding, onboardingMove, finishOnboarding,
   setTelegramDefault, openTelegramSettings, telegramAction, setTaskTelegram, retryTelegram,
   taskModelChanged, setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
   newTask, createTask, openTask, saveTask, comment, toTodo, stopTask, resetTask, deleteTask, closeModal,
