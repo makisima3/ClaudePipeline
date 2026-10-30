@@ -73,6 +73,30 @@ class PipelineTests(unittest.TestCase):
         self.tid = db.create_task(self.pid, "Проверка", "Описание")
         FakeRun.instances.clear()
 
+    @unittest.skipUnless(os.name == "nt", "Стартовые CMD-файлы предназначены для Windows")
+    def test_windows_launchers_parse_and_forward_arguments(self):
+        with tempfile.TemporaryDirectory(prefix="agentpipeline-launcher-") as tmp:
+            folder = Path(tmp) / "проверка запуска"
+            folder.mkdir()
+            for agent in ("codex", "claude"):
+                shutil.copy2(SOURCE / f"start_{agent}.cmd", folder)
+            env = os.environ.copy()
+            env["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")
+            for agent in ("codex", "claude"):
+                with self.subTest(agent=agent, python="missing"):
+                    result = subprocess.run([os.environ["COMSPEC"], "/d", "/c", f"start_{agent}.cmd"],
+                                            cwd=folder, env=env, input=b"\n", capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 1, result.stderr.decode("utf-8", "replace"))
+                    self.assertIn(b"https://www.python.org/downloads/", result.stdout)
+            # Только заглушка интерпретатора: сервер, Claude и Codex не запускаются.
+            (folder / "python.cmd").write_text("@echo off\necho LAUNCHER_PYTHON %*\nexit /b 0\n", encoding="ascii")
+            for agent in ("codex", "claude"):
+                with self.subTest(agent=agent, python="stub"):
+                    result = subprocess.run([os.environ["COMSPEC"], "/d", "/c", f"start_{agent}.cmd", "--no-browser"],
+                                            cwd=folder, env=env, input=b"\n", capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+                    self.assertIn(f"LAUNCHER_PYTHON server\\main.py --agent {agent} --no-browser".encode(), result.stdout)
+
     def test_00_legacy_migration_evidence(self):
         # Наличие колонок доказывает миграцию созданной до импорта базы.
         self.assertIn("codex_session_id", {r["name"] for r in db.q("PRAGMA table_info(tasks)")})
