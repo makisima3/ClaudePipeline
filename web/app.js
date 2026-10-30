@@ -10,8 +10,8 @@ const STATUS = {
   waiting: ["ждёт ответа", "st-waiting"], done: ["готово", "st-done"], error: ["ошибка", "st-error"],
   interrupted: ["прервано", "st-interrupted"],
 };
-const MODELS = [["", "по умолчанию"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"], ["fable", "Fable"]];
-const EFFORTS = [["", "по умолчанию"], ["low", "low"], ["medium", "medium"], ["high", "high"], ["xhigh", "xhigh"], ["max", "max"]];
+let MODELS = [["", "по умолчанию"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"], ["fable", "Fable"]];
+let EFFORTS = [["", "по умолчанию"], ["low", "low"], ["medium", "medium"], ["high", "high"], ["xhigh", "xhigh"], ["max", "max"]];
 const COLORS = ["#c8642c", "#3b6fd8", "#2f8a57", "#9b4dca", "#d64571", "#b07a12", "#1f8f99", "#6f6c64"];
 
 const S = {
@@ -46,12 +46,31 @@ const refs = html => html.replace(/(^|[\s(>«,;:])#(\d+)\b/g, (_, pre, id) => `$
 const SEQ = {};
 const fresh = k => { const n = SEQ[k] = (SEQ[k] || 0) + 1; return () => SEQ[k] === n; };
 
+function effortList(model, useDefault = false) {
+  if (S.state?.agent !== "codex") return EFFORTS;
+  const models = S.state.agent_info?.models || [];
+  const selected = useDefault ? model : model || S.state.settings.model;
+  const m = selected ? models.find(m => (m.model || m.id) === selected) : models.find(m => m.isDefault);
+  return [["", "по умолчанию"], ...(m?.supportedReasoningEfforts || []).map(e => [e.reasoningEffort, e.reasoningEffort])];
+}
+function taskModelChanged(prefix) {
+  const effort = $(`#${prefix}-effort`);
+  effort.innerHTML = opts(effortList($(`#${prefix}-model`).value), effort.value);
+}
+
 async function loadState() {
   const ok = fresh("state");
   const st = await api("GET", "/api/state");
   if (!ok()) return;
   if (bootChanged(st.boot_id)) return;
   S.state = st;
+  if (st.agent_info?.models?.length) {
+    MODELS = [["", "по умолчанию"], ...st.agent_info.models.filter(m => !m.hidden).map(m => [m.model || m.id, m.displayName || m.model || m.id])];
+  }
+  EV_NAMES.text = "Агент";  // история может содержать ответы обоих исполнителей
+  document.title = "ClaudePipeline — " + (st.agent_name || "Claude");
+  const logo = document.querySelector(".logo");
+  if (logo) logo.innerHTML = '<span class="mark">≡</span>ClaudePipeline · ' + esc(st.agent_name || "Claude");
   if (!project() && S.state.projects.length) S.projectId = S.state.projects[0].id;
   renderHeader();
 }
@@ -116,7 +135,7 @@ function renderHeader() {
   if (pl.restart) text = `Перезапуск трекера${pl.restart.busy ? ` · ждёт завершения: ${pl.restart.busy}` : "…"}`;
   else if (pl.enabled === "stopping") text = `Доделывает (${pl.running.length}) и выключится`;
   else if (pl.enabled === "1") {
-    if (pl.pause_until * 1000 > Date.now()) text = `Пауза по лимиту до ${new Date(pl.pause_until * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}`;
+    if (pl.pause_until * 1000 > Date.now()) text = `Пауза по лимиту ${pl.pause_estimated ? "(повторная попытка) " : ""}до ${new Date(pl.pause_until * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}`;
     else text = pl.running.length ? `Работает · задач: ${pl.running.length}` : "Включён · ждёт задач";
   }
   $("#pstate").textContent = text;
@@ -135,7 +154,7 @@ function render() {
 function renderBoard() {
   const v = $("#view");
   if (!S.state.projects.length) {
-    v.innerHTML = `<div class="empty-board"><h2>Проектов пока нет</h2><p>Проект — это папка, в которой Claude будет работать над задачами.</p>
+    v.innerHTML = `<div class="empty-board"><h2>Проектов пока нет</h2><p>Проект — это папка, в которой ${S.state.agent_name} будет работать над задачами.</p>
       <button class="primary" onclick="App.newProject()">Создать первый проект</button></div>`;
     return;
   }
@@ -222,8 +241,8 @@ function newTask(columnId) {
     <label>Описание — контекст, что сделать, критерии готовности</label><textarea id="nt-desc" rows="8"></textarea>
     <div class="task-grid">
       <div><label>Колонка</label><select id="nt-col">${cols.map(c => `<option value="${c.id}" ${c.id === def ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
-      <div class="row"><div class="grow"><label>Модель</label><select id="nt-model">${opts(MODELS)}</select></div>
-        <div class="grow"><label>Effort</label><select id="nt-effort">${opts(EFFORTS)}</select></div></div>
+      <div class="row"><div class="grow"><label>Модель</label><select id="nt-model" onchange="App.taskModelChanged('nt')">${opts(MODELS)}</select></div>
+        <div class="grow"><label>Effort</label><select id="nt-effort">${opts(effortList())}</select></div></div>
     </div>
     <div class="actions"><button onclick="App.closeModal()">Отмена</button><button class="primary" onclick="App.createTask()">Создать</button></div>`);
   setTimeout(() => $("#nt-title").focus(), 0);
@@ -249,8 +268,8 @@ async function openTask(id) {
     <label>Описание</label><textarea id="tt-desc" rows="6" oninput="App.renderRefs()">${esc(t.description || "")}</textarea>
     <div class="refs muted" id="tt-refs"></div>
     <div class="row" style="align-items:flex-end">
-      <div class="grow"><label>Модель</label><select id="tt-model">${opts(MODELS, t.model)}</select></div>
-      <div class="grow"><label>Effort</label><select id="tt-effort">${opts(EFFORTS, t.effort)}</select></div>
+      <div class="grow"><label>Модель</label><select id="tt-model" onchange="App.taskModelChanged('tt')">${opts(MODELS, t.model)}</select></div>
+      <div class="grow"><label>Effort</label><select id="tt-effort">${opts(effortList(t.model), t.effort)}</select></div>
       <button onclick="App.saveTask()">Сохранить</button>
     </div>
     <div id="tt-dyn"></div>
@@ -313,7 +332,7 @@ function renderTaskDyn() {
   const t = S.task;
   if (!t || !$("#tt-dyn")) return;
   $("#tt-line").innerHTML = `${t.project_id !== S.projectId ? `${esc(t.project_name)} · ` : ""}${esc(t.column_name)} ${pill(t.status)} ${t.cost_usd ? `· ≈$${t.cost_usd.toFixed(2)} (эквивалент API)` : ""}
-    ${t.session_id ? `· сессия <code title="claude --resume ${t.session_id}">${t.session_id.slice(0, 8)}</code>` : ""}`;
+    ${t.session_id ? `· сессия <code title="${S.state.agent === 'codex' ? 'codex resume' : 'claude --resume'} ${t.session_id}">${t.session_id.slice(0, 8)}</code>` : ""}`;
   const open = t.questions.filter(q => q.status === "open");
   let html = "";
   if (t.status === "error" && t.error) html += `<div class="callout err">${esc(t.error)}</div>`;
@@ -411,7 +430,7 @@ function answerText(qid) { const v = $(`#ans-${qid}`).value.trim(); if (v) answe
 function renderSettings() {
   const s = S.state.settings, p = project();
   $("#view").innerHTML = `<div class="pad">
-    <h2>Настройки</h2>
+    <h2>Настройки · ${esc(S.state.agent_name)}</h2>
     <div class="section"><h3>Выключение пайплайна</h3>
       <label class="radio"><input type="radio" name="stop" value="graceful" ${s.stop_mode === "graceful" ? "checked" : ""} onchange="App.setSetting('stop_mode','graceful')">
         <span><b>Доделать текущие задачи</b> и выключиться<div class="hint">Новые задачи не берутся, начатые завершаются.</div></span></label>
@@ -423,13 +442,13 @@ function renderSettings() {
       <input type="number" min="1" max="10" value="${s.max_parallel}" style="width:120px" onchange="App.setSetting('max_parallel', Math.max(1, +this.value || 1))">
       <label>Режим разрешений</label>
       <select onchange="App.setSetting('permission_mode', this.value)">${opts([
-        ["bypassPermissions", "Без вопросов (bypassPermissions) — агент делает всё сам"],
-        ["acceptEdits", "Правки файлов сами, остальное — спрашивать в «Вопросах»"],
-        ["default", "Спрашивать разрешение на всё, кроме чтения"]], s.permission_mode)}</select>
+        ["bypassPermissions", "Без вопросов — полный доступ"],
+        ["acceptEdits", "Правки проекта сами, остальное — через запрос разрешения"],
+        ["default", "Чтение свободно, изменения — через запрос разрешения"]], s.permission_mode)}</select>
       <div class="hint">Запросы разрешений приходят на страницу «Вопросы» как тикеты «Разрешить / Запретить».</div>
       <div class="row">
         <div class="grow"><label>Модель для задач</label><select onchange="App.setSetting('model', this.value)">${opts(MODELS, s.model)}</select></div>
-        <div class="grow"><label>Effort для задач</label><select onchange="App.setSetting('effort', this.value)">${opts(EFFORTS, s.effort)}</select></div>
+        <div class="grow"><label>Effort для задач</label><select onchange="App.setSetting('effort', this.value)">${opts(effortList(s.model, true), s.effort)}</select></div>
         <div class="grow"><label>Модель для чата и импорта</label><select onchange="App.setSetting('chat_model', this.value)">${opts(MODELS, s.chat_model)}</select></div>
       </div>
       <label>Git в конце задачи (если папка проекта — git-репозиторий)</label>
@@ -461,7 +480,13 @@ function renderSettings() {
   renderUpdateSection();
 }
 
-async function setSetting(k, v) { await api("POST", "/api/settings", { [k]: v }); await loadState(); toast("Сохранено"); }
+async function setSetting(k, v) {
+  const changes = { [k]: v };
+  if (k === "model" && S.state.agent === "codex" && !effortList(v, true).some(([e]) => e === S.state.settings.effort)) changes.effort = "";
+  await api("POST", "/api/settings", changes); await loadState();
+  if (S.view === "settings" && k === "model") renderSettings();
+  toast("Сохранено");
+}
 async function restartTracker() {
   if (!confirm("Перезапустить трекер? Он дождётся завершения выполняющихся задач и ответа чата (не дольше 10 минут), потом перезапустится, а страница перезагрузится.")) return;
   S.state.pipeline = await api("POST", "/api/restart");
@@ -553,7 +578,7 @@ function hideUpdate() { ls.set("updHidden", S.state.update.remote); renderUpdate
 function newProject() {
   modal(`<h3>Новый проект</h3>
     <label>Название</label><input id="np-name" placeholder="Например: Моя игра">
-    <label>Папка проекта — здесь Claude будет работать</label>
+    <label>Папка проекта — здесь ${S.state.agent_name} будет работать</label>
     <div class="row"><input id="np-path" placeholder="C:\\Projects\\MyGame"><button onclick="App.pickFolder('#np-path')">Обзор…</button></div>
     <div class="actions"><button onclick="App.closeModal()">Отмена</button><button class="primary" onclick="App.createProject()">Создать</button></div>`);
   setTimeout(() => $("#np-name").focus(), 0);
@@ -612,7 +637,7 @@ async function columnMenu(cid) {
 // ---------------- импорт ----------------
 function importDialog() {
   modal(`<h3>Импорт задач текстом</h3>
-    <p class="muted">Вставь текст из другого трекера, письма или заметок — одну задачу или сразу пачку. Claude разберёт его на карточки, ты проверишь перед созданием.</p>
+    <p class="muted">Вставь текст из другого трекера, письма или заметок — одну задачу или сразу пачку. ${S.state.agent_name} разберёт его на карточки, ты проверишь перед созданием.</p>
     <textarea id="im-text" rows="12" placeholder="Вставь сюда…"></textarea>
     <div id="im-result"></div>
     <div class="actions" id="im-actions"><button onclick="App.closeModal()">Отмена</button><button class="primary" id="im-go" onclick="App.importParse()">Разобрать</button></div>`, "wide");
@@ -670,7 +695,7 @@ function renderChat(toBottom) {
   const box = $("#msgs");
   const atBottom = toBottom || box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   box.innerHTML = S.chat.messages.map(msgHtml).join("") ||
-    `<div class="muted" style="padding:20px;text-align:center">Это чат с Claude внутри трекера. Он видит доску и может создавать и двигать задачи, отвечать про статус, включать пайплайн. Можно вставить сюда текст задач — он их заведёт.</div>`;
+    `<div class="muted" style="padding:20px;text-align:center">Это чат с ${S.state.agent_name} внутри трекера. Он видит доску и может создавать и двигать задачи, отвечать про статус, включать пайплайн. Можно вставить сюда текст задач — он их заведёт.</div>`;
   $("#typing").classList.toggle("hidden", !S.chat.running);
   $("#chatStop").classList.toggle("hidden", !S.chat.running);
   if (atBottom) box.scrollTop = box.scrollHeight;
@@ -943,7 +968,7 @@ document.addEventListener("click", e => {
 });
 
 window.App = {
-  setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
+  taskModelChanged, setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
   newTask, createTask, openTask, saveTask, comment, toTodo, stopTask, resetTask, deleteTask, closeModal,
   renderRefs, linkSearch, linkPick, unlinkTask,
   answer, answerText, toggleAnswered, setSetting, clearPause, restartTracker, addColumn, columnMenu,

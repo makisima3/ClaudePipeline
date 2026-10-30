@@ -13,6 +13,53 @@ from pathlib import Path
 
 import db
 from runner import CLAUDE, NO_WINDOW, ClaudeRun, short_tool
+from runtime import AGENT, NAME
+
+
+CODEX_SYSTEM = """Используй доступные инструменты Codex для файлов и команд, view_image для изображений.
+Инструменты трекера доступны через MCP tracker; найди их, если они отложены.
+Соблюдай AGENTS.md проекта. Не ищи инструмент Claude Agent или Read.
+"""
+
+
+def agent_info():
+    if AGENT == "codex":
+        from codex_runner import INFO
+        return INFO
+    return {"models": [{"id": m, "model": m, "displayName": m} for m in ("opus", "sonnet", "haiku", "fable")]}
+
+
+def preflight():
+    if AGENT == "codex":
+        from codex_runner import preflight as check
+        check()
+
+
+def active_runs():
+    runs = list(orch.runs.values()) + list(chat.runs.values())
+    if AGENT == "codex":
+        from codex_runner import active_runs as codex_active
+        runs += codex_active()
+    return list(set(runs))
+
+
+def agent_run(**kwargs):
+    if AGENT == "codex":
+        from codex_runner import CodexRun
+        return CodexRun(**kwargs)
+    for key in ("on_session", "images"):
+        kwargs.pop(key, None)
+    return ClaudeRun(**kwargs)
+
+
+def task_context(t):
+    parts = [task_prompt(t, {"name": t["project_name"], "path": t["project_path"]})]
+    if t.get("summary"):
+        parts.append("Предыдущий итог: " + t["summary"])
+    if t.get("report_path") and Path(t["report_path"]).is_file():
+        parts.append("Предыдущий отчёт: " + t["report_path"])
+    parts += [e["kind"] + ": " + e["text"] for e in db.task_events(t["id"], limit=100)]
+    return "Контекст работы другого исполнителя (его сессия сюда не переносится):\n" + "\n\n".join(parts)
 
 
 # ---------------- события для браузера (SSE) ----------------
@@ -156,7 +203,13 @@ QUIET_TOOLS = {"ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate"}  # слу�
 
 
 def transcript_path(cwd, session_id):
+    if not session_id:
+        return None
     enc = re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+    if AGENT == "codex":
+        import os
+        folder = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"
+        return next(folder.glob(f"**/*{session_id}.jsonl"), None) if session_id else None
     return Path.home() / ".claude" / "projects" / enc / f"{session_id}.jsonl"
 
 
@@ -169,13 +222,17 @@ class Orchestrator:
 
     def recover(self):
         """После перезапуска сервера: незавершённые запуски продолжить."""
-        for t in db.q("SELECT * FROM tasks WHERE status='running'"):
+        for t in map(db.agent_row, db.q("SELECT * FROM tasks WHERE status='running'")):
             if t["session_id"]:
                 db.move_task(t["id"], "progress", status="resume",
                              pending_prompt="Сервер пайплайна перезапускался, работа прервалась. Продолжи задачу с того места, где остановился.")
             else:
                 db.move_task(t["id"], "todo", status="queued")
         db.ex("UPDATE questions SET status='cancelled' WHERE status='open' AND kind='permission'")
+        for t in db.q("""SELECT t.id FROM tasks t WHERE t.status='waiting' AND NOT EXISTS
+                         (SELECT 1 FROM questions q WHERE q.task_id=t.id AND q.status='open')"""):
+            db.move_task(t["id"], "progress", status="resume",
+                         pending_prompt="Сервер перезапустился во время ожидания разрешения. Продолжи задачу; при необходимости запроси разрешение заново.")
 
     def state(self):
         s = db.get_settings()
@@ -183,6 +240,7 @@ class Orchestrator:
             "enabled": s["pipeline_enabled"],
             "running": list(self.runs.keys()),
             "pause_until": float(s["pause_until"] or 0),
+            "pause_estimated": db.get_setting("pause_estimated") == "1",
             "restart": restart.info(),
         }
 
@@ -242,6 +300,7 @@ class Orchestrator:
                 free -= 1
 
     def start_task(self, t):
+        t = db.get_task(t["id"])
         project = db.one("SELECT * FROM projects WHERE id=?", (t["project_id"],))
         if not Path(project["path"]).is_dir():
             db.update_task(t["id"], status="error", error=f"Папка проекта не найдена: {project['path']}")
@@ -255,14 +314,20 @@ class Orchestrator:
             prompt = rerun_prompt(t)
         else:
             prompt = task_prompt(t, project)
-        session_id = t["session_id"] or str(uuid.uuid4())
+        previous = t.get("last_provider") or ("claude" if db.one("SELECT session_id FROM tasks WHERE id=?", (t["id"],))["session_id"] else None)
+        if previous and previous != AGENT:
+            prompt = task_context(t) + "\n\n" + prompt
+        session_id = t["session_id"] or (str(uuid.uuid4()) if AGENT == "claude" else None)
         s = db.get_settings()
-        system = TASK_SYSTEM + (f"\n\nДополнительные указания пользователя:\n{s['extra_prompt']}" if s["extra_prompt"].strip() else "")
+        system = TASK_SYSTEM
+        if AGENT == "codex":
+            system = system.replace("(инструмент Agent)", "(доступные инструменты подагентов Codex)") + "\n" + CODEX_SYSTEM
+        system +=  (f"\n\nДополнительные указания пользователя:\n{s['extra_prompt']}" if s["extra_prompt"].strip() else "")
         db.move_task(t["id"], "progress", status="running", session_id=session_id, last_run_at=time.time(),
                      pending_prompt=None, error=None)
         task_event(t["id"], "system", "Запуск продолжения сессии" if resume else "Старт новой сессии")
         tid = t["id"]
-        run = ClaudeRun(
+        run = agent_run(
             key=f"task-{tid}", cwd=project["path"], prompt=prompt, session_id=session_id, resume=resume,
             role="task", system_prompt=system, task_id=tid, project_id=t["project_id"],
             model=t["model"] or s["model"] or None, effort=t["effort"] or s["effort"] or None,
@@ -271,6 +336,7 @@ class Orchestrator:
             on_tool=lambda n, i: None if n.startswith("mcp__tracker__") or n in QUIET_TOOLS else task_event(tid, "tool", short_tool(n, i)),
             on_rate_limit=lambda info: self._rate_limited(info),
             on_done=lambda r: self._done(tid, r),
+            on_session=lambda sid: db.update_task(tid, session_id=sid),
         )
         with self.lock:
             self.runs[tid] = run
@@ -279,13 +345,14 @@ class Orchestrator:
         except Exception as e:
             with self.lock:
                 self.runs.pop(tid, None)
-            db.update_task(tid, status="error", error=f"Не удалось запустить claude: {e}")
+            db.update_task(tid, status="error", error=f"Не удалось запустить {NAME}: {e}")
         changed(t["project_id"])
         hub.send("state", state=self.state())
 
     def _rate_limited(self, info):
         resets = float(info.get("resetsAt") or 0) or time.time() + 15 * 60
         db.set_setting("pause_until", str(resets))
+        db.set_setting("pause_estimated", "1" if info.get("estimated", not info.get("resetsAt")) else "0")
         hub.send("state", state=self.state())
 
     def _done(self, tid, r):
@@ -301,7 +368,10 @@ class Orchestrator:
         t = db.get_task(tid)
         if not t:
             return
-        db.update_task(tid, cost_usd=(t["cost_usd"] or 0) + float(r.get("total_cost_usd") or 0))
+        if AGENT == "claude":
+            db.update_task(tid, cost_usd=(t["cost_usd"] or 0) + float(r.get("total_cost_usd") or 0))
+        if not r.get("is_error") and not r.get("killed"):
+            db.update_task(tid, last_provider=AGENT)
         # процесс умер, ожидая разрешения — запрос больше никто не ждёт
         db.ex("UPDATE questions SET status='cancelled' WHERE task_id=? AND status='open' AND kind='permission'", (tid,))
         if t["status"] == "waiting" and not db.q("SELECT id FROM questions WHERE task_id=? AND status='open'", (tid,)):
@@ -324,8 +394,7 @@ class Orchestrator:
                                pending_prompt="Работу прервали (пайплайн выключали). Продолжи задачу с того места, где остановился.")
                 task_event(tid, "system", "Пайплайн выключен — задача продолжится при следующем включении")
         elif r.get("rate_limited") or (r.get("is_error") and re.search(r"usage limit|rate limit|limit reached", str(r.get("result")), re.I)):
-            if not r.get("rate_limited"):
-                self._rate_limited({})
+            self._rate_limited(r.get("rate_limited") or {})
             db.update_task(tid, status="resume",
                            pending_prompt="Работа прервалась из-за лимита подписки. Продолжи задачу с того места, где остановился.")
             task_event(tid, "system", "Упёрлись в лимит, продолжу после сброса")
@@ -364,9 +433,11 @@ def finish_task(tid, summary, report):
     md += f"**Проект:** {t['project_name']} · **Завершено:** {stamp}\n\n"
     md += f"## Итог\n\n{summary}\n\n## Отчёт\n\n{report}\n\n"
     md += "---\n\n### Служебное\n\n"
-    md += f"- Сессия Claude: `{t['session_id']}`\n"
-    md += f"- Продолжить вручную: `cd \"{t['project_path']}\"` и `claude --resume {t['session_id']}`\n"
-    md += f"- Транскрипт: `{transcript_path(t['project_path'], t['session_id'])}`\n"
+    md += f"- Сессия {NAME}: `{t['session_id']}`\n"
+    md += f"- Продолжить вручную: `cd \"{t['project_path']}\"` и `{'codex resume' if AGENT == 'codex' else 'claude --resume'} {t['session_id']}`\n"
+    transcript = transcript_path(t['project_path'], t['session_id'])
+    if transcript:
+        md += f"- Транскрипт: `{transcript}`\n"
     md += f"- Сырой лог пайплайна: `{db.DATA / 'runs' / f'task-{tid}.jsonl'}`\n"
     if path.exists():
         prev = path.read_text(encoding="utf-8")
@@ -441,6 +512,7 @@ class Chat:
         return cid in self.runs
 
     def info(self, c):
+        c = db.agent_row(c)
         return {**c, "running": c["id"] in self.runs, "titling": titler.busy(c["id"])}
 
     def create(self, pid):
@@ -480,23 +552,34 @@ class Chat:
         hub.send("chats", project_id=pid, chat_id=cid)
         folder = db.chat_dir(pid, cid)
         prompt = text
+        images = []
         if attachments:
             prompt = (text or "Пользователь прислал вложения без текста — посмотри их.")
-            prompt += "\n\nВложения (открой через Read, картинки ты видишь):\n"
+            prompt += "\n\nВложения (прочитай файлы доступными инструментами):\n"
             prompt += "\n".join(f"- {folder / a['file']}" for a in attachments)
+        if AGENT == "codex":
+            images = [str(folder / a["file"]) for a in (attachments or []) if a.get("type", "") in ("image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp")]
         resume = bool(c["session_id"])
-        sid = c["session_id"] or str(uuid.uuid4())
-        if not resume:
-            db.ex("UPDATE chats SET session_id=? WHERE id=?", (sid, cid))
+        previous = c.get("last_provider") or ("claude" if db.one("SELECT session_id FROM chats WHERE id=?", (cid,))["session_id"] else None)
+        if previous and previous != AGENT:
+            history = []
+            for m in db.chat_messages(cid):
+                files = "\n".join(str(folder / a["file"]) for a in m["attachments"])
+                history.append(m["role"] + ": " + (m["text"] or "") + ("\nФайлы: " + files if files else ""))
+            prompt = "Контекст чата с другим исполнителем:\n" + "\n\n".join(history) + "\n\nТекущее сообщение:\n" + prompt
+        sid = c["session_id"] or (str(uuid.uuid4()) if AGENT == "claude" else None)
+        db.set_chat_session(cid, sid)
         s = db.get_settings()
-        run = ClaudeRun(
+        run = agent_run(
             key=f"chat-{pid}-{cid}", cwd=cwd, prompt=prompt, session_id=sid, resume=resume, role="chat",
-            system_prompt=CHAT_SYSTEM.format(name=p["name"], id=pid, path=p["path"]), project_id=pid,
+            system_prompt=CHAT_SYSTEM.format(name=p["name"], id=pid, path=p["path"]) + ("\n" + CODEX_SYSTEM if AGENT == "codex" else ""), project_id=pid,
             model=s["chat_model"] or s["model"] or None, permission_mode=s["permission_mode"],
             log_path=db.DATA / "runs" / f"chat-{pid}-{cid}.jsonl", add_dirs=[str(folder)] if attachments else None,
             on_text=lambda t: self._msg(cid, pid, "assistant", t),
             on_tool=lambda n, i: None if n in QUIET_TOOLS else self._msg(cid, pid, "tool", short_tool(n.replace("mcp__tracker__", "трекер."), i)),
             on_done=lambda r: self._done(cid, pid, r),
+            on_session=lambda sid: db.set_chat_session(cid, sid), images=images,
+            on_rate_limit=lambda info: orch._rate_limited(info),
         )
         self.runs[cid] = run
         hub.send("chat_state", project_id=pid, chat_id=cid, running=True)
@@ -504,7 +587,7 @@ class Chat:
             run.start()
         except Exception as e:
             self.runs.pop(cid, None)
-            self._msg(cid, pid, "error", f"Не удалось запустить claude: {e}")
+            self._msg(cid, pid, "error", f"Не удалось запустить {NAME}: {e}")
             hub.send("chat_state", project_id=pid, chat_id=cid, running=False)
         return True
 
@@ -516,10 +599,12 @@ class Chat:
 
     def _done(self, cid, pid, r):
         self.runs.pop(cid, None)
+        if not r.get("is_error") and not r.get("killed"):
+            db.ex("UPDATE chats SET last_provider=? WHERE id=?", (AGENT, cid))
         if r.get("is_error") and not r.get("killed"):
             err = str(r.get("result"))
-            if "No conversation found" in err:
-                db.ex("UPDATE chats SET session_id=NULL WHERE id=?", (cid,))
+            if re.search(r"No conversation found|thread.*not found|no rollout found", err, re.I):
+                db.set_chat_session(cid, None)
                 err += "\n(сессия чата сброшена, отправь сообщение ещё раз)"
             self._msg(cid, pid, "error", err[:2000])
         hub.send("chat_state", project_id=pid, chat_id=cid, running=False)
@@ -631,7 +716,7 @@ class Titler:
                 text = "[вложения: " + ", ".join(a["name"] for a in json.loads(r["attachments"])) + "]"
             if len(text) > TITLE_MSG:
                 text = text[:TITLE_MSG] + "…"
-            out.append(("Пользователь: " if r["role"] == "user" else "Claude: ") + text)
+            out.append(("Пользователь: " if r["role"] == "user" else "Ассистент: ") + text)
         return "\n\n".join(out)[:TITLE_INPUT]
 
     def _make(self, cid):
@@ -645,6 +730,14 @@ class Titler:
 
     def generate(self, text):
         """Отдельный claude -p без сессии, MCP, инструментов и настроек (без CLAUDE.md и хуков) на дешёвой модели."""
+        if AGENT == "codex":
+            from codex_runner import generate
+            text = generate(f"Начало разговора:\n\n{text}", TITLE_SYSTEM, db.get_setting("chat_model") or db.get_setting("model") or None, timeout=TITLE_TIMEOUT)
+            line = next((l for l in text.splitlines() if l.strip()), "")
+            title = re.sub(r"\s+", " ", line).strip().strip('"\'`«»*#').rstrip(".").strip()
+            if not title:
+                raise RuntimeError("Codex вернул пустое название")
+            return title[:TITLE_LEN]
         cmd = [CLAUDE, "-p", "--output-format", "json", "--strict-mcp-config", "--no-session-persistence",
                "--model", "haiku", "--tools", "", "--setting-sources", "", "--system-prompt", TITLE_SYSTEM]
         r = subprocess.run(cmd, input=f"Начало разговора:\n\n{text}".encode("utf-8"), capture_output=True,
@@ -694,7 +787,7 @@ class Restart:
         self.exit = None  # main.py: запустить новый экземпляр и завершить этот
 
     def info(self):
-        return {"since": self.since, "busy": len(orch.runs) + len(chat.runs)} if self.since else None
+        return {"since": self.since, "busy": len(active_runs())} if self.since else None
 
     def request(self, by):
         if not self.since:
@@ -705,7 +798,7 @@ class Restart:
     def check(self):
         if not self.since or self.exiting:
             return
-        busy = lambda: list(orch.runs.values()) + list(chat.runs.values())
+        busy = active_runs
         if busy() and time.time() - self.since < RESTART_TIMEOUT:
             return
         if busy():
@@ -899,6 +992,13 @@ def import_parse(pid, text):
     p = db.one("SELECT * FROM projects WHERE id=?", (pid,))
     cwd = p["path"] if Path(p["path"]).is_dir() else str(db.ROOT)
     s = db.get_settings()
+    if AGENT == "codex":
+        from codex_runner import generate
+        schema = json.loads(json.dumps(IMPORT_SCHEMA))
+        schema["additionalProperties"] = False
+        schema["properties"]["tasks"]["items"]["additionalProperties"] = False
+        return json.loads(generate(IMPORT_PROMPT.format(text=text), "Разбирай только переданный текст. Не используй инструменты.",
+                                   s["chat_model"] or s["model"] or None, schema)).get("tasks", [])
     cmd = [CLAUDE, "-p", "--output-format", "json", "--strict-mcp-config", "--no-session-persistence",
            "--json-schema", json.dumps(IMPORT_SCHEMA)]
     if s["chat_model"] or s["model"]:

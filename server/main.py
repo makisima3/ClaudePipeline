@@ -15,6 +15,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote
 
+import runtime
+if __name__ == "__main__":
+    runtime.acquire()
+
 import db
 import pipeline as pl
 from runner import PORT, NO_WINDOW
@@ -50,6 +54,9 @@ def need(cond, msg="Не найдено", code=404):
 def api_state(h, body, query):
     return {
         "boot_id": pl.BOOT_ID,
+        "agent": runtime.AGENT,
+        "agent_name": runtime.NAME,
+        "agent_info": pl.agent_info(),
         "settings": db.get_settings(),
         "pipeline": pl.orch.state(),
         "update": updater.state(),
@@ -141,7 +148,7 @@ def api_board(h, body, query, pid):
                            (SELECT COUNT(*) FROM task_links l WHERE l.task_id=t.id OR l.linked_id=t.id) AS links
                     FROM tasks t WHERE project_id=? ORDER BY position""", (pid,))
     return {"project": p, "columns": db.q("SELECT * FROM columns WHERE project_id=? ORDER BY position", (pid,)),
-            "tasks": tasks}
+            "tasks": [db.agent_row(t) for t in tasks]}
 
 
 @route("POST", r"/api/projects/(\d+)/columns")
@@ -200,7 +207,8 @@ def api_task(h, body, query, tid):
     t["events"] = db.task_events(tid)
     t["questions"] = [db.get_question(r["id"]) for r in db.q("SELECT id FROM questions WHERE task_id=? ORDER BY id", (tid,))]
     t["running"] = tid in pl.orch.runs
-    t["transcript"] = str(pl.transcript_path(t["project_path"], t["session_id"])) if t["session_id"] else None
+    transcript = pl.transcript_path(t["project_path"], t["session_id"])
+    t["transcript"] = str(transcript) if transcript else None
     t["links"] = [{k: l[k] for k in ("id", "title", "status", "column_name", "column_kind", "project_id", "project_name")}
                   for l in db.task_links(tid)]
     return t
@@ -371,7 +379,7 @@ def api_chat_rename(h, body, query, cid):
 @route("POST", r"/api/chats/(\d+)/title")
 def api_chat_retitle(h, body, query, cid):
     get_chat(cid)
-    need(pl.chat.retitle(cid), "Claude в этом чате ещё не ответил — называть пока нечего", 400)
+    need(pl.chat.retitle(cid), "Агент в этом чате ещё не ответил — называть пока нечего", 400)
     return pl.chat.info(db.get_chat(cid))
 
 
@@ -646,8 +654,8 @@ class Server(ThreadingHTTPServer):
 
 
 def spawn_successor():
-    """Новый экземпляр сервера в своём окне консоли, как из start.cmd. Он дождётся выхода этого процесса."""
-    cmd = [sys.executable, str(Path(__file__).resolve()), "--no-browser", "--after", str(os.getpid())]
+    """Новый экземпляр с тем же исполнителем. Он дождётся выхода этого процесса."""
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--no-browser", "--after", str(os.getpid()), "--agent", runtime.AGENT]
     if os.name != "nt":
         return subprocess.Popen(cmd, cwd=db.ROOT, start_new_session=True)
     si = subprocess.STARTUPINFO()
@@ -695,13 +703,14 @@ def main():
     after = int(sys.argv[sys.argv.index("--after") + 1]) if "--after" in sys.argv else None
     if os.name == "nt":
         import ctypes
-        ctypes.windll.kernel32.SetConsoleTitleW("ClaudePipeline")
+        ctypes.windll.kernel32.SetConsoleTitleW("ClaudePipeline — " + runtime.NAME)
     try:
         srv = bind(after)
     except OSError as e:
         if after:
             pl.log_restart(f"новый экземпляр не смог занять порт {PORT}: {e}")
         raise
+    pl.preflight()
     pl.orch.recover()
     threading.Thread(target=pl.orch.loop, daemon=True).start()
     threading.Thread(target=updater.loop, daemon=True).start()
@@ -725,10 +734,13 @@ def main():
         os._exit(0)  # не ждать потоков SSE и чтения
     except KeyboardInterrupt:
         print("Останавливаю...")
-        for run in list(pl.orch.runs.values()):
+        runs = pl.active_runs()
+        for run in runs:
             run.kill()
-        for run in list(pl.chat.runs.values()):
-            run.kill()
+        for run in runs:
+            if hasattr(run, "finished"):
+                run.finished.wait(10)
+        srv.server_close()
 
 
 if __name__ == "__main__":

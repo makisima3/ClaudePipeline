@@ -1,5 +1,6 @@
 """SQLite-хранилище трекера. Один connection на процесс, доступ под общим замком."""
 import json
+from runtime import AGENT
 import sqlite3
 import threading
 import time
@@ -74,9 +75,14 @@ DEFAULT_SETTINGS = {
     "chat_model": "",
     "extra_prompt": "",
     "pause_until": "0",
+    "pause_estimated": "0",
     "update_check_minutes": "60",     # проверка обновлений на GitHub, 0 — только вручную
     "git_mode": "commit_push",        # off | commit | commit_push — что агент делает с git в конце задачи
 }
+
+PROVIDER_SETTINGS = {"model", "effort", "chat_model", "permission_mode", "pause_until", "pause_estimated"}
+for _key in PROVIDER_SETTINGS:
+    DEFAULT_SETTINGS["codex_" + _key] = DEFAULT_SETTINGS[_key]
 
 # Системные колонки: kind -> имя по умолчанию
 SYSTEM_COLUMNS = [
@@ -91,6 +97,12 @@ with _lock:
     _conn.executescript(SCHEMA)
     for k, v in DEFAULT_SETTINGS.items():
         _conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (k, v))
+    for table, fields in {"tasks": ("codex_session_id", "codex_model", "codex_effort", "last_provider"),
+                          "chats": ("codex_session_id", "last_provider")}.items():
+        existing = {r["name"] for r in _conn.execute(f"PRAGMA table_info({table})")}
+        for field in fields:
+            if field not in existing:
+                _conn.execute(f"ALTER TABLE {table} ADD COLUMN {field} TEXT")
     # миграции старых баз
     if "attachments" not in {r["name"] for r in _conn.execute("PRAGMA table_info(chat_messages)")}:
         _conn.execute("ALTER TABLE chat_messages ADD COLUMN attachments TEXT")
@@ -158,15 +170,24 @@ def now():
 
 # ---------- settings ----------
 def get_settings():
-    return {r["key"]: r["value"] for r in q("SELECT key, value FROM settings")}
+    out = {r["key"]: r["value"] for r in q("SELECT key, value FROM settings")}
+    if AGENT == "codex":
+        out.update({k: out["codex_" + k] for k in PROVIDER_SETTINGS})
+    return out
 
 
 def get_setting(key):
+    key = setting_key(key)
     r = one("SELECT value FROM settings WHERE key=?", (key,))
     return r["value"] if r else DEFAULT_SETTINGS.get(key)
 
 
+def setting_key(key):
+    return "codex_" + key if AGENT == "codex" and key in PROVIDER_SETTINGS else key
+
+
 def set_setting(key, value):
+    key = setting_key(key)
     ex("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
        (key, str(value)))
 
@@ -197,9 +218,28 @@ def find_column(project_id, name_or_kind):
 
 # ---------- tasks ----------
 def get_task(tid):
-    return one("""SELECT t.*, c.kind AS column_kind, c.name AS column_name, p.name AS project_name, p.path AS project_path
+    return agent_row(one("""SELECT t.*, c.kind AS column_kind, c.name AS column_name, p.name AS project_name, p.path AS project_path
                   FROM tasks t JOIN columns c ON c.id=t.column_id JOIN projects p ON p.id=t.project_id
-                  WHERE t.id=?""", (tid,))
+                  WHERE t.id=?""", (tid,)))
+
+
+def agent_row(row):
+    if row and AGENT == "codex":
+        row = dict(row)
+        if "cost_usd" in row:
+            row["cost_usd"] = None
+        for key in ("session_id", "model", "effort"):
+            if "codex_" + key in row:
+                row[key] = row["codex_" + key]
+    return row
+
+
+def session_column():
+    return "codex_session_id" if AGENT == "codex" else "session_id"
+
+
+def set_chat_session(cid, sid):
+    ex(f"UPDATE chats SET {session_column()}=? WHERE id=?", (sid, cid))
 
 
 def create_task(project_id, title, description="", column_id=None, model=None, effort=None):
@@ -207,14 +247,17 @@ def create_task(project_id, title, description="", column_id=None, model=None, e
         column_id = column_by_kind(project_id, "backlog")["id"]
     pos = one("SELECT COALESCE(MAX(position), 0) + 1 AS p FROM tasks WHERE column_id=?", (column_id,))["p"]
     t = now()
-    return ex("""INSERT INTO tasks(project_id, column_id, title, description, position, model, effort, created_at, updated_at)
-                 VALUES(?,?,?,?,?,?,?,?,?)""", (project_id, column_id, title, description, pos, model or None,
-                                                effort or None, t, t))
+    tid = ex("""INSERT INTO tasks(project_id, column_id, title, description, position, created_at, updated_at)
+                 VALUES(?,?,?,?,?,?,?)""", (project_id, column_id, title, description, pos, t, t))
+    update_task(tid, model=model or None, effort=effort or None)
+    return tid
 
 
 def update_task(tid, **fields):
     if not fields:
         return
+    if AGENT == "codex":
+        fields = {("codex_" + k if k in ("session_id", "model", "effort") else k): v for k, v in fields.items()}
     fields["updated_at"] = now()
     cols = ", ".join(f"{k}=?" for k in fields)
     ex(f"UPDATE tasks SET {cols} WHERE id=?", (*fields.values(), tid))
@@ -294,7 +337,7 @@ def chat_dir(project_id, chat_id):
 
 
 def get_chat(chat_id):
-    return one("SELECT * FROM chats WHERE id=?", (chat_id,))
+    return agent_row(one("SELECT * FROM chats WHERE id=?", (chat_id,)))
 
 
 def list_chats(project_id):
