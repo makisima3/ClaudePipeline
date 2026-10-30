@@ -64,6 +64,10 @@ CREATE TABLE IF NOT EXISTS task_links (  -- связь двусторонняя,
     created_at REAL, PRIMARY KEY (task_id, linked_id)
 );
 CREATE INDEX IF NOT EXISTS task_links_linked ON task_links(linked_id);
+CREATE TABLE IF NOT EXISTS project_task_counters (
+    project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    last_number INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS telegram_deliveries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -162,6 +166,34 @@ def _migrate_chats():
 _migrate_chats()
 
 
+def _migrate_task_numbers():
+    """Нумерация по созданию; счётчик переживает удаление любых задач проекта."""
+    with _lock:
+        _conn.execute("BEGIN IMMEDIATE")
+        try:
+            if "task_number" not in {r["name"] for r in _conn.execute("PRAGMA table_info(tasks)")}:
+                _conn.execute("ALTER TABLE tasks ADD COLUMN task_number INTEGER CHECK(task_number > 0)")
+            for p in _conn.execute("SELECT id FROM projects").fetchall():
+                pid = p["id"]
+                _conn.execute("""INSERT INTO project_task_counters(project_id, last_number)
+                                 SELECT ?, COALESCE(MAX(task_number),0) FROM tasks WHERE project_id=?
+                                 ON CONFLICT(project_id) DO UPDATE SET last_number=MAX(last_number,excluded.last_number)""", (pid, pid))
+                number = _conn.execute("SELECT last_number FROM project_task_counters WHERE project_id=?", (pid,)).fetchone()[0]
+                rows = _conn.execute("SELECT id FROM tasks WHERE project_id=? AND task_number IS NULL ORDER BY created_at, id", (pid,)).fetchall()
+                for r in rows:
+                    number += 1
+                    _conn.execute("UPDATE tasks SET task_number=? WHERE id=?", (number, r["id"]))
+                _conn.execute("UPDATE project_task_counters SET last_number=? WHERE project_id=?", (number, pid))
+            _conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS tasks_project_number ON tasks(project_id, task_number)")
+            _conn.execute("COMMIT")
+        except BaseException:
+            _conn.execute("ROLLBACK")
+            raise
+
+
+_migrate_task_numbers()
+
+
 def q(sql, args=()):
     with _lock:
         return [dict(r) for r in _conn.execute(sql, args).fetchall()]
@@ -238,6 +270,8 @@ def get_task(tid):
 
 
 def agent_row(row):
+    if row and "task_number" in row:
+        row = {**row, "task_id": row["id"]}
     if row and AGENT == "codex":
         row = dict(row)
         if "cost_usd" in row:
@@ -275,16 +309,28 @@ def telegram_requested(text):
 def create_task(project_id, title, description="", column_id=None, model=None, effort=None, telegram_notify=False):
     if column_id is None:
         column_id = column_by_kind(project_id, "backlog")["id"]
-    pos = one("SELECT COALESCE(MAX(position), 0) + 1 AS p FROM tasks WHERE column_id=?", (column_id,))["p"]
-    t = now()
-    tid = ex("""INSERT INTO tasks(project_id, column_id, title, description, position, created_at, updated_at)
-                 VALUES(?,?,?,?,?,?,?)""", (project_id, column_id, title, description, pos, t, t))
-    update_task(tid, model=model or None, effort=effort or None,
-                telegram_notify=int(bool(telegram_notify) or telegram_requested(title + "\n" + description)))
-    return tid
+    with _lock:
+        _conn.execute("BEGIN IMMEDIATE")
+        try:
+            ex("INSERT OR IGNORE INTO project_task_counters(project_id) VALUES(?)", (project_id,))
+            ex("UPDATE project_task_counters SET last_number=last_number+1 WHERE project_id=?", (project_id,))
+            number = one("SELECT last_number FROM project_task_counters WHERE project_id=?", (project_id,))["last_number"]
+            pos = one("SELECT COALESCE(MAX(position), 0) + 1 AS p FROM tasks WHERE column_id=?", (column_id,))["p"]
+            t = now()
+            tid = ex("""INSERT INTO tasks(project_id, task_number, column_id, title, description, position, created_at, updated_at)
+                         VALUES(?,?,?,?,?,?,?,?)""", (project_id, number, column_id, title, description, pos, t, t))
+            update_task(tid, model=model or None, effort=effort or None,
+                        telegram_notify=int(bool(telegram_notify) or telegram_requested(title + "\n" + description)))
+            _conn.execute("COMMIT")
+            return tid
+        except BaseException:
+            _conn.execute("ROLLBACK")
+            raise
 
 
 def update_task(tid, **fields):
+    if {"id", "project_id", "task_id", "task_number"} & fields.keys():
+        raise ValueError("Идентификатор, проект и номер задачи неизменяемы")
     if not fields:
         return
     if "title" in fields or "description" in fields:
@@ -319,7 +365,7 @@ def task_events(task_id, after=0, limit=500):
 # ---------- связанные задачи ----------
 def task_links(tid):
     """Связанные задачи (в обе стороны) с колонкой и проектом."""
-    return q("""SELECT t.id, t.title, t.status, t.summary, t.report_path, t.project_id, c.name AS column_name,
+    return q("""SELECT t.id, t.id AS task_id, t.task_number, t.title, t.status, t.summary, t.report_path, t.project_id, c.name AS column_name,
                        c.kind AS column_kind, p.name AS project_name
                 FROM task_links l JOIN tasks t ON t.id = CASE WHEN l.task_id=? THEN l.linked_id ELSE l.task_id END
                 JOIN columns c ON c.id=t.column_id JOIN projects p ON p.id=t.project_id
@@ -333,7 +379,7 @@ def link_tasks(a, b):
         raise ValueError("Нельзя связать задачу саму с собой")
     for x in (a, b):
         if not one("SELECT id FROM tasks WHERE id=?", (x,)):
-            raise ValueError(f"Нет задачи #{x}")
+            raise ValueError(f"Нет задачи с task_id={x}")
     ex("INSERT OR IGNORE INTO task_links(task_id, linked_id, created_at) VALUES(?,?,?)", (min(a, b), max(a, b), now()))
 
 
@@ -358,7 +404,7 @@ def get_question(qid):
 
 
 def list_questions(status="open"):
-    rows = q("""SELECT qu.*, t.title AS task_title, t.project_id, p.name AS project_name, p.color AS project_color
+    rows = q("""SELECT qu.*, t.task_number, t.title AS task_title, t.project_id, p.name AS project_name, p.color AS project_color
                 FROM questions qu JOIN tasks t ON t.id=qu.task_id JOIN projects p ON p.id=t.project_id
                 WHERE (?='all' OR qu.status=?) ORDER BY qu.id DESC LIMIT 200""", (status, status))
     for r in rows:

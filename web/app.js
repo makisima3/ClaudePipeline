@@ -64,8 +64,33 @@ const fmtTime = ts => new Date(ts * 1000).toLocaleString("ru-RU", { day: "2-digi
 const opts = (list, val) => list.map(([v, t]) => `<option value="${v}" ${v === (val || "") ? "selected" : ""}>${t}</option>`).join("");
 const pill = st => STATUS[st] ? `<span class="pill ${STATUS[st][1]}">${st === "running" ? '<span class="pulse"></span>' : ""}${STATUS[st][0]}</span>` : "";
 const project = () => S.state?.projects.find(p => p.id === S.projectId);
-// #12 в уже экранированном тексте -> ссылка, открывающая карточку задачи
-const refs = html => html.replace(/(^|[\s(>«,;:])#(\d+)\b/g, (_, pre, id) => `${pre}<a href="#" class="tref" onclick="event.preventDefault(); App.openTask(${id})">#${id}</a>`);
+// #12 относится к проекту текста; готовые ссылки с техническим адресом сохраняем.
+function refs(html, pid) {
+  const root = document.createElement("div"); root.innerHTML = html;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes = [];
+  while (walker.nextNode()) if (!walker.currentNode.parentElement.closest("a,code,pre")) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const text = esc(node.textContent).replace(/(^|[\s(>«,;:])#(\d+)\b/g, (match, pre, number, offset, source) => {
+      const before = source.slice(0, offset).toLocaleLowerCase();
+      const named = (S.state?.projects || []).filter(p => {
+        const name = esc(p.name).toLocaleLowerCase();
+        return before.endsWith(name) && (before.length === name.length || /[\s«"(:,;]/.test(before[before.length - name.length - 1]));
+      }).sort((a, b) => b.name.length - a.name.length);
+      if (named.length > 1 && named[0].name.length === named[1].name.length) return match;
+      const target = named[0]?.id || Number(pid);
+      return `${pre}<a href="#" class="tref" onclick="event.preventDefault(); App.openTaskNumber(${number},${target})">#${number}</a>`;
+    });
+    const span = document.createElement("span"); span.innerHTML = text; node.replaceWith(...span.childNodes);
+  }
+  return root.innerHTML;
+}
+
+async function openTaskNumber(number, pid) {
+  if (!pid) return toast("Для номера задачи нужен проект");
+  const rows = await api("GET", `/api/tasks?q=${number}&project_id=${pid}`);
+  if (rows.length !== 1) return toast("Задача с таким номером в этом проекте не найдена");
+  await openTask(rows[0].task_id);
+}
 
 // ---------------- загрузка ----------------
 // Запросы одного вида не упорядочены: ответ, после которого ушёл более новый запрос, устарел и отбрасывается.
@@ -227,7 +252,7 @@ function renderBoard() {
 function cardHtml(t) {
   return `<div class="card" draggable="${t.status !== "running"}" data-id="${t.id}" onclick="App.openTask(${t.id})">
     <div class="title">${esc(t.title)}</div>
-    <div class="meta"><span>#${t.id}</span>${pill(t.status)}
+    <div class="meta"><span>#${t.task_number}</span>${pill(t.status)}
       ${t.open_q ? `<span class="pill st-waiting">вопросов: ${t.open_q}</span>` : ""}
       ${t.model ? `<span>${esc(t.model)}</span>` : ""}
       ${t.links ? `<span class="links-n" title="Связанных задач: ${t.links}">🔗${t.links}</span>` : ""}</div>
@@ -299,8 +324,9 @@ async function openTask(id) {
   const t = await api("GET", `/api/tasks/${id}`);
   if (!ok()) return;
   S.task = t;
+  S.linkRes = []; S.linkContext = null;
   modal(`
-    <div class="row"><input class="title-input grow" id="tt-title" value="${esc(t.title)}"><span class="muted">#${t.id}</span></div>
+    <div class="row"><input class="title-input grow" id="tt-title" value="${esc(t.title)}"><span class="muted">${esc(t.project_name)} #${t.task_number}</span></div>
     <div class="row muted" style="font-size:12px;margin:2px 4px 0" id="tt-line"></div>
     <label>Описание</label><textarea id="tt-desc" rows="6" oninput="App.renderRefs()">${esc(t.description || "")}</textarea>
     <div class="refs muted" id="tt-refs"></div>
@@ -313,8 +339,9 @@ async function openTask(id) {
     <div id="tt-dyn"></div>
     <label>Связанные задачи <span class="muted">— агент увидит их итоги и пути к отчётам</span></label>
     <div class="links" id="tt-links"></div>
+    <label class="row"><input type="checkbox" style="width:auto" id="tt-link-all" onchange="App.linkSearch()"> Искать во всех проектах</label>
     <div class="link-add"><input id="tt-link" placeholder="Связать с задачей: номер или часть заголовка" autocomplete="off"
-      oninput="App.linkSearch()" onblur="$('#tt-link-res').classList.add('hidden')" onkeydown="if(event.key==='Enter'){event.preventDefault();App.linkPick(0)}"><div class="link-res hidden" id="tt-link-res"></div></div>
+      oninput="App.linkSearch()" onblur="$('#tt-link-res').classList.add('hidden')" onkeydown="if(event.key==='Enter'){event.preventDefault();App.linkEnter()}"><div class="link-res hidden" id="tt-link-res"></div></div>
     <label>Ход работы</label>
     <div class="timeline" id="tt-tl">${t.events.map(evHtml).join("") || '<div class="muted">Пока пусто</div>'}</div>
     <div class="row" style="margin-top:8px"><input id="tt-comment" placeholder="Комментарий к задаче (агент увидит при следующем запуске)" onkeydown="if(event.key==='Enter')App.comment()"><button onclick="App.comment()">Добавить</button></div>
@@ -327,16 +354,19 @@ async function openTask(id) {
 function renderRefs() {
   const el = $("#tt-refs");
   if (!el) return;
-  const ids = [...new Set([...($("#tt-desc").value.matchAll(/(?:^|[\s(«,;:])#(\d+)\b/g))].map(m => m[1]))];
-  el.innerHTML = ids.length ? "Упомянуты: " + refs(ids.map(i => "#" + i).join(" ")) : "";
+  const root = document.createElement("div");
+  root.innerHTML = refs(md($("#tt-desc").value), S.task.project_id);
+  const links = [...new Set([...root.querySelectorAll('.tref, a[href^="/?task_id="]')].map(a => a.outerHTML))];
+  const heading = root.querySelector('a[href^="/?task_id="]') ? "Упомянуты: " : "Упомянуты в этом проекте: ";
+  el.innerHTML = links.length ? heading + links.join(" ") : "";
 }
 
 function renderLinks() {
   const t = S.task, el = $("#tt-links");
   if (!t || !el) return;
   el.innerHTML = t.links.map(l => `<div class="link-item">
-      <a href="#" onclick="event.preventDefault(); App.openTask(${l.id})"><span class="muted">#${l.id}</span> ${esc(l.title)}</a>
-      <span class="muted">${esc(l.column_name)}${l.project_id !== t.project_id ? ` · ${esc(l.project_name)}` : ""}</span>${pill(l.status)}
+      <a href="#" onclick="event.preventDefault(); App.openTask(${l.id})"><span class="muted">${esc(l.project_name)} #${l.task_number}</span> ${esc(l.title)}</a>
+      <span class="muted">${esc(l.column_name)}</span>${pill(l.status)}
       <span class="grow"></span><button class="ghost" title="Убрать связь" onclick="App.unlinkTask(${l.id})">✕</button>
     </div>`).join("") || '<div class="muted">Нет</div>';
 }
@@ -347,18 +377,28 @@ const linkSearch = debounce(async () => {
   const q = inp.value.trim(), ok = fresh("linksearch");
   if (!q) { S.linkRes = []; return box.classList.add("hidden"); }
   const skip = [t.id, ...t.links.map(l => l.id)].join(",");
-  const res = await api("GET", `/api/tasks?q=${encodeURIComponent(q)}&exclude=${skip}`).catch(() => []);
-  if (!ok()) return;
+  const scope = $("#tt-link-all").checked ? "" : `&project_id=${t.project_id}`;
+  const res = await api("GET", `/api/tasks?q=${encodeURIComponent(q)}&exclude=${skip}${scope}`).catch(() => []);
+  if (!ok() || S.task?.id !== t.id || inp.value.trim() !== q ||
+      scope !== ($("#tt-link-all").checked ? "" : `&project_id=${t.project_id}`)) return;
   S.linkRes = res;
+  S.linkContext = {taskId: t.id, q, all: $("#tt-link-all").checked};
   box.innerHTML = res.map((r, i) => `<div class="link-opt" onmousedown="event.preventDefault(); App.linkPick(${i})">
-      <span class="muted">#${r.id}</span> ${esc(r.title)} <span class="muted">· ${esc(r.column_name)}${r.project_id !== t.project_id ? ` · ${esc(r.project_name)}` : ""}</span></div>`).join("")
+      <span class="muted">${esc(r.project_name)} #${r.task_number}</span> ${esc(r.title)} <span class="muted">· ${esc(r.column_name)}</span></div>`).join("")
     || '<div class="muted" style="padding:6px 10px">Ничего не нашлось</div>';
   box.classList.remove("hidden");
 }, 200);
 
+function linkEnter() {
+  if (S.linkRes?.length === 1) linkPick(0);
+  else toast("Выбери задачу в результатах поиска с названием проекта");
+}
+
 async function linkPick(i) {
   const r = S.linkRes?.[i], t = S.task;
   if (!r || !t) return;
+  const ctx = S.linkContext;
+  if (!ctx || ctx.taskId !== t.id || ctx.q !== $("#tt-link").value.trim() || ctx.all !== $("#tt-link-all").checked) return;
   await api("POST", `/api/tasks/${t.id}/links`, { task_id: r.id });
   $("#tt-link").value = ""; S.linkRes = []; $("#tt-link-res").classList.add("hidden");
   refreshTask();
@@ -400,7 +440,7 @@ function renderTaskDyn() {
 
 const EV_NAMES = { text: "Claude", tool: "", progress: "Прогресс", question: "Вопрос", answer: "Ответ", comment: "Ты", system: "Система", finish: "Готово", error: "Ошибка" };
 function evHtml(e) {
-  const body = e.kind === "text" ? `<div class="body md">${refs(md(e.text))}</div>` : `<span class="body">${refs(esc(e.text))}</span>`;
+  const body = e.kind === "text" ? `<div class="body md">${refs(md(e.text), S.task?.project_id)}</div>` : `<span class="body">${esc(e.text)}</span>`;
   return `<div class="ev ${e.kind}"><span class="t">${fmtTime(e.ts)}</span>${EV_NAMES[e.kind] ? `<span class="k">${EV_NAMES[e.kind]}</span>` : ""}${body}</div>`;
 }
 
@@ -466,7 +506,7 @@ function questionHtml(q, withTask = true) {
   const answered = q.status !== "open";
   return `<div class="qcard ${answered ? "answered" : ""}">
     ${withTask ? `<div class="qhead"><span class="dot" style="background:${q.project_color}"></span>${esc(q.project_name)} ·
-      <a onclick="App.openTask(${q.task_id})">#${q.task_id} ${esc(q.task_title)}</a><span class="grow"></span>${fmtTime(q.created_at)}</div>` : ""}
+      <a onclick="App.openTask(${q.task_id})">#${q.task_number} ${esc(q.task_title)}</a><span class="grow"></span>${fmtTime(q.created_at)}</div>` : ""}
     <div class="qtext">${perm ? "🔐 " : ""}${esc(q.text)}</div>
     ${perm && q.payload?.input ? `<pre class="md" style="font-size:12px;max-height:200px;overflow:auto;background:var(--col);padding:8px;border-radius:6px">${esc(JSON.stringify(q.payload.input, null, 2))}</pre>` : ""}
     ${answered ? `<div class="muted">${q.status === "answered" ? "Ответ: " + esc(q.answer) : "Отменён"}</div>` : `
@@ -529,6 +569,7 @@ function renderOnboarding() {
   const titles = ["От задачи до результата", "Сохраняй изменения в Git", "Получай результаты в Telegram"];
   const codex = S.state.agent === "codex";
   const intro = `<p>Проект — папка на ПК с трекером. Создай задачу с ожидаемым результатом, перенеси в «В работу» и включи пайплайн в шапке.</p>
+    <p>В каждом проекте задачи нумеруются с #1; удалённые номера не повторяются. Для связи с другим проектом включи поиск во всех проектах и выбери задачу по названию проекта и номеру.</p>
     <p>Вопросы агента — во «Вопросах»: ответь, чтобы продолжить. Итог и отчёт — в карточке «Готово».</p>
     <div class="onboarding-status"><b>Исполнитель: ${esc(S.state.agent_name)}</b><br>${codex
       ? (S.state.agent_info?.version ? `Codex CLI ${esc(S.state.agent_info.version)}: вход ChatGPT проверен при запуске сервера.` : "Вход ChatGPT на этом экране не проверялся.")
@@ -612,7 +653,7 @@ function renderSettings() {
         ["commit_push", "Коммит и push — по коммиту на задачу, push без force"],
         ["commit", "Только коммит — push делаю сам"],
         ["off", "Ничего — агент git не трогает"]], s.git_mode)}</select>
-      <div class="hint">Общий режим для всех проектов. Агент коммитит только изменения своей задачи с сообщением «#id заголовок». Доступ к репозиторию трекера и к репозиториям проектов настраивается отдельно. В папке трекера неотправленные коммиты блокируют его обновление.</div>
+      <div class="hint">Общий режим для всех проектов. Агент коммитит только изменения своей задачи с сообщением «Проект #номер заголовок» и указывает технический task_id в описании коммита. Доступ к репозиторию трекера и к репозиториям проектов настраивается отдельно. В папке трекера неотправленные коммиты блокируют его обновление.</div>
       ${gitReadinessPanel(p, s.git_mode)}</div>
       <label>Дополнительные указания всем агентам задач</label>
       <textarea rows="4" placeholder="Например: «Код Unity проверяй через UnityMCP»" onchange="App.setSetting('extra_prompt', this.value)">${esc(s.extra_prompt)}</textarea>
@@ -966,9 +1007,9 @@ function renderChat(toBottom) {
 }
 
 const msgHtml = m => {
-  if (m.role === "assistant") return `<div class="msg assistant md">${refs(md(m.text))}</div>`;
+  if (m.role === "assistant") return `<div class="msg assistant md">${refs(md(m.text), S.chat.pid)}</div>`;
   const atts = m.attachments?.length ? `<div class="msg-atts">${m.attachments.map((a, i) => attHtml(m.id, a, i)).join("")}</div>` : "";
-  return `<div class="msg ${m.role}">${m.text ? refs(esc(m.text)) : ""}${atts}</div>`;
+  return `<div class="msg ${m.role}">${m.text ? refs(esc(m.text), S.chat.pid) : ""}${atts}</div>`;
 };
 
 const isImage = type => /^image\/(png|jpeg|gif|webp|bmp)$/.test(type || "");
@@ -1236,7 +1277,7 @@ window.App = {
   setTelegramDefault, openTelegramSettings, telegramAction, setTaskTelegram, retryTelegram,
   taskModelChanged, setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
   newTask, createTask, openTask, saveTask, comment, toTodo, stopTask, resetTask, deleteTask, closeModal,
-  renderRefs, linkSearch, linkPick, unlinkTask,
+  renderRefs, openTaskNumber, linkSearch, linkEnter, linkPick, unlinkTask,
   answer, answerText, toggleAnswered, setSetting, clearPause, restartTracker, addColumn, columnMenu,
   checkUpdate, applyUpdate, toggleUpdList, hideUpdate,
   checkGitReadiness, gitAuthChanged, openGitSettings,
@@ -1249,5 +1290,7 @@ window.App = {
   if (new URLSearchParams(location.search).get("setup") === "telegram") openTelegramSettings();
   connect();  // подписываемся до загрузки доски и чата, чтобы не потерять события, пришедшие во время неё
   await loadBoard();
+  const taskId = new URLSearchParams(location.search).get("task_id");
+  if (/^\d+$/.test(taskId || "")) await openTask(+taskId);
   if (S.chatOpen) loadChat();
 })();

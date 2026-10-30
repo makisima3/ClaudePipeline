@@ -24,7 +24,7 @@
   const id = location.pathname.split("/").pop();
   fetch(`/api/tasks/${id}/report`).then(r => r.json()).then(d => {
     if (d.error) { document.getElementById("r").textContent = d.error; return; }
-    document.title = `Отчёт #${id}: ${d.title}`;
+    document.title = `Отчёт ${d.project_name} #${d.task_number}: ${d.title}`;
     document.getElementById("r").innerHTML = md(d.markdown);
   });
 </script>

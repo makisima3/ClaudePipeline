@@ -311,7 +311,7 @@ class PipelineTests(unittest.TestCase):
         with patch.object(cr, "generate", return_value='{"tasks":[{"title":"Новая","description":"Описание"}]}'):
             self.assertEqual(pl.import_parse(self.pid, "Новая"), [{"title": "Новая", "description": "Описание"}])
         out = pl._mcp("create_task", {"title": "Связанная", "links": [self.tid]}, None, self.pid)
-        self.assertIn("Создана", out)
+        self.assertEqual(json.loads(out)["message"], "Задача создана")
         self.assertEqual(len(db.task_links(self.tid)), 1)
         self.assertIn("Связанные задачи", pl.task_prompt(db.get_task(self.tid), {"name": "Тест", "path": str(SANDBOX)}))
 

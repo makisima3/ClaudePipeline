@@ -130,6 +130,52 @@ setInterval(() => {
  fs.writeFileSync(screenshot.replace('.png','-task.png'),Buffer.from(taskShot.data,'base64'));
  await evaluate('App.retryTelegram()');
  state.telegramRetried=await evaluate('S.task.telegram_delivery.state==="pending" && S.task.status==="done"');
+ // Два проекта с #1: локальные ссылки, поиск и выбор технического адреса.
+ const numbers=await evaluate(`(async()=>{
+   const suffix=innerWidth;
+   const a=await api('POST','/api/projects',{name:'Номера A '+suffix,path:window.__sandboxPath});
+   const b=await api('POST','/api/projects',{name:'Номера B '+suffix,path:window.__sandboxPath});
+   const first=await api('POST','/api/projects/'+a.id+'/tasks',{title:'Первая A'});
+   const second=await api('POST','/api/projects/'+b.id+'/tasks',{title:'Первая B'});
+   const anchor=await api('POST','/api/projects/'+a.id+'/tasks',{title:'Связи и поиск',description:'#1'});
+   return {a,b,first,second,anchor};
+ })()`);
+ await evaluate('loadState()');
+ await evaluate(`App.closeModal(); App.selectProject(${numbers.a.id}); App.setView('board')`);
+ await waitFor(`S.board?.project.id===${numbers.a.id} && !!document.querySelector('.card')`);
+ state.numberBoard=await evaluate(`document.querySelector('.card[data-id="${numbers.first.id}"] .meta').textContent.includes('#1')`);
+ await evaluate(`App.openTask(${numbers.anchor.id})`);
+ state.numberCard=await evaluate(`document.querySelector('.modal .row').textContent.includes('Номера A '+innerWidth+' #2')`);
+ await evaluate('document.querySelector("#tt-refs a").click()');
+ await waitFor(`S.task?.id===${numbers.first.id}`);
+ state.numberReference=await evaluate(`S.task.id===${numbers.first.id} && S.task.id!==${numbers.second.id}`);
+ await evaluate(`App.openTask(${numbers.anchor.id})`);
+ await evaluate('document.querySelector("#tt-link").value="#1"; App.linkSearch()');
+ await waitFor('S.linkRes?.length===1');
+ state.numberScoped=await evaluate(`S.linkRes[0].task_id===${numbers.first.id}`);
+ await evaluate('document.querySelector("#tt-link-all").checked=true; App.linkSearch()');
+ await waitFor('S.linkRes?.length>=2 && S.linkContext?.all');
+ state.numberDistinct=await evaluate(`document.querySelector('#tt-link-res').textContent.includes('Номера A '+innerWidth+' #1') && document.querySelector('#tt-link-res').textContent.includes('Номера B '+innerWidth+' #1')`);
+ await evaluate('App.linkEnter()');
+ state.numberAmbiguous=await evaluate('S.task.links.length===0');
+ await evaluate(`App.linkPick(S.linkRes.findIndex(r=>r.task_id===${numbers.second.id}))`);
+ await waitFor(`S.task?.links.some(l=>l.task_id===${numbers.second.id})`);
+ state.numberLink=await evaluate(`document.querySelector('#tt-links').textContent.includes('Номера B '+innerWidth+' #1')`);
+ state.numberCanonical=await evaluate(`(()=>{const h=refs(md('[Номера B #1](/?task_id=${numbers.second.id})'),${numbers.a.id});return h.includes('/?task_id=${numbers.second.id}') && !h.includes('openTaskNumber')})()`);
+ state.numberNamedReference=await evaluate(`refs('Номера B '+innerWidth+' #1',${numbers.a.id}).includes('openTaskNumber(1,${numbers.b.id})')`);
+ state.numberDuplicateProjectNames=await evaluate(`(()=>{const saved=S.state.projects; S.state.projects=[...saved,{id:99999,name:'Номера B '+innerWidth}]; const h=refs('Номера B '+innerWidth+' #1',${numbers.a.id}); S.state.projects=saved;return !h.includes('openTaskNumber')})()`);
+ await evaluate(`document.querySelector('#tt-desc').value='[Номера B #1](/?task_id=${numbers.second.id})'; App.renderRefs()`);
+ state.numberCanonicalDescription=await evaluate(`document.querySelector('#tt-refs a').getAttribute('href')==='/?task_id=${numbers.second.id}' && !document.querySelector('#tt-refs .tref')`);
+ state.numberOverflow=await evaluate('document.documentElement.scrollWidth>innerWidth');
+ await evaluate('document.querySelectorAll(".toast").forEach(e=>e.remove())');
+ const numberShot=await call('Page.captureScreenshot',{format:'png'});
+ fs.writeFileSync(screenshot.replace('.png','-numbers.png'),Buffer.from(numberShot.data,'base64'));
+ await call('Page.navigate',{url:target+'/?task_id='+numbers.second.id});
+ await waitFor(`S.task?.id===${numbers.second.id} && !!document.querySelector('#tt-title')`);
+ state.numberCanonicalNavigation=await evaluate(`S.task.id===${numbers.second.id} && S.task.project_name==='Номера B '+innerWidth`);
+ await evaluate('history.replaceState(null,"","/")');
+ await evaluate(`App.closeModal(); App.selectProject(${numbers.first.project_id}); api('DELETE','/api/projects/${numbers.b.id}')`);
+ await evaluate(`api('DELETE','/api/projects/${numbers.a.id}').then(()=>loadState()).then(()=>loadBoard())`);
  await evaluate('App.closeModal(); App.openTelegramSettings()');
  await evaluate('App.toggleChat(); App.openTelegramSettings()');
  state.telegramChatSetup=await evaluate(`S.view === "settings" && S.chatOpen === ${+width>=900}`);
@@ -235,6 +281,8 @@ setInterval(() => {
             assert all(state[k] for k in ("telegramInitial", "telegramNotReady", "telegramRemembered", "telegramReady", "telegramFormDefault",
                                          "telegramCreated", "telegramIndependent", "telegramExplicit", "telegramDeliveryError", "telegramRetried", "telegramChatControl", "telegramChatSetup")), state
             assert not state["telegramOverflow"], state
+            assert all(state[k] for k in ("numberBoard", "numberCard", "numberReference", "numberScoped", "numberDistinct", "numberAmbiguous", "numberLink", "numberCanonical", "numberCanonicalDescription", "numberCanonicalNavigation", "numberNamedReference", "numberDuplicateProjectNames")), state
+            assert not state["numberOverflow"], state
             assert all(state[k] for k in ("wizardOffer", "wizardSkip", "wizardReopen", "wizardStepSkip", "wizardGitOff", "wizardGitShared", "wizardReturn", "wizardLayouts",
                                          "wizardTelegramReady", "wizardTelegramShared", "wizardTelegramFresh", "wizardError", "wizardClaudeEmpty", "wizardCreateProject", "wizardSelectProject", "wizardComplete", "wizardCompleteReopen")), state
             assert not state["wizardOverflow"], state

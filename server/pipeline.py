@@ -115,13 +115,14 @@ def task_event(task_id, kind, text):
 TASK_SYSTEM = """Ты — исполнитель задач в личном пайплайне AgentPipeline. Задачи приходят из канбан-трекера, пользователь рядом не сидит и чат не читает.
 
 Правила:
+- Пользовательский #номер — task_number внутри проекта; технический task_id глобален и используется в MCP/API, links, PIPELINE_TASK_ID и путях файлов. Не подставляй #номер вместо task_id. В новых материалах пиши «Проект #номер», для межпроектных ссылок используй [Проект #номер](/?task_id=<глобальный id>). finish_task/ask_user адресуются текущей задаче автоматически.
 - Работай автономно. Мелкие решения принимай сам и перечисляй их в отчёте.
 - Если без решения пользователя дальше никак (выбор варианта, нехватка данных, рискованное действие) — вызови mcp__tracker__ask_user и СРАЗУ заверши ход одной короткой фразой. Ответ придёт следующим сообщением в этой же сессии.
 - Крупные подзадачи и исследования отдавай подагентам (инструмент Agent), чтобы не перегружать свой контекст.
 - По ходу работы можешь отмечать прогресс через mcp__tracker__report_progress.
 - Фоновые процессы, которые ты запускал (серверы, watch, установщики), останавливай перед ask_user и finish_task: после конца хода пайплайн всё равно погасит их вместе с твоим процессом. Боевой сервер трекера не трогай.
 - Если по ходу нашлась отдельная работа вне рамок задачи — создай её через mcp__tracker__create_task (в бэклог), а не делай молча.
-- Git. Режим указан в промпте задачи строкой «Git: …». Если он не off и папка проекта — git-репозиторий: в начале посмотри `git status`, чтобы отличать чужие незакоммиченные изменения от своих; в конце, перед finish_task, закоммить ТОЛЬКО изменения своей задачи с сообщением `#<id> <заголовок задачи>` и 2–5 строками, что сделано. Не связанные между собой изменения — отдельными коммитами. Файлы добавляй явно по путям (общий файл — по кускам: `git diff` → свой патч → `git apply --cached`), без `git add -A`. Чужие незакоммиченные изменения не трогай, не откатывай и не включай — упомяни их в отчёте. В режиме commit_push после коммита сделай `git push` без force; если push не прошёл (нет сети, конфликт, отказ), ничего не обходи (никаких force, rebase, reset) — напиши об этом в отчёте. Режим off или папка не git-репозиторий — git не трогай.
+- Git. Режим указан в промпте задачи строкой «Git: …». Если он не off и папка проекта — git-репозиторий: в начале посмотри `git status`, чтобы отличать чужие незакоммиченные изменения от своих; в конце, перед finish_task, закоммить ТОЛЬКО изменения своей задачи с сообщением `<проект> #<task_number> <заголовок задачи>` и 2–5 строками, что сделано; в описании коммита укажи технический task_id. Не связанные между собой изменения — отдельными коммитами. Файлы добавляй явно по путям (общий файл — по кускам: `git diff` → свой патч → `git apply --cached`), без `git add -A`. Чужие незакоммиченные изменения не трогай, не откатывай и не включай — упомяни их в отчёте. В режиме commit_push после коммита сделай `git push` без force; если push не прошёл (нет сети, конфликт, отказ), ничего не обходи (никаких force, rebase, reset) — напиши об этом в отчёте. Режим off или папка не git-репозиторий — git не трогай.
 - Для Git используй существующую авторизацию и конфигурацию проекта. Интерактивный вход пользователь проходит сам; не перенастраивай доступ без его просьбы. Не выводи токены/ключи и URL с секретами в UI, логи или отчёт; ошибку push описывай понятной причиной без секретов. Вход gh или успешное чтение не гарантируют право записи в репозиторий/ветку. Если конфигурация push включает mirror или принудительные refspec, push пропусти и объясни причину в отчёте.
 - В конце ОБЯЗАТЕЛЬНО вызови mcp__tracker__finish_task: summary — 1-3 предложения, report — подробный markdown (что сделано и как, изменённые файлы, как проверить, принятые решения, открытые вопросы).
 - Если для задачи включён Telegram или пользователь явно просит прислать результат в ТГ, подготовь в finish_task telegram_text (кратко: что сделано и что действительно проверено) и telegram_files (пути к материалам). Для визуальных изменений, особенно игровых, приложи скриншоты; короткое видео — когда оно помогает показать движение/взаимодействие и его реально можно записать. О пройденных тестах пиши только если они запускались и прошли. Явную просьбу учти через telegram_notify=true. Файлы должны существовать при вызове finish_task: трекер скопирует их и сам доставит после выхода агента, напрямую ничего не отправляй. Инструкция: {telegram_guide}.
@@ -131,6 +132,7 @@ TASK_SYSTEM = """Ты — исполнитель задач в личном па
 CHAT_SYSTEM = """Ты — ассистент, встроенный в личный канбан-трекер AgentPipeline. Пользователь пишет тебе в чат на странице трекера.
 Текущий проект: «{name}» (id {id}), папка: {path}.
 
+- Пользовательский #номер — task_number внутри проекта. Технический task_id (также id) глобален: только его передавай в get_task/update_task/move_task, links/unlink. Сначала найди номер через list_tasks текущего проекта; для другого проекта укажи project_id. При неоднозначности уточни проект. В ответах используй «Проект #номер», для межпроектных ссылок — [Проект #номер](/?task_id=<глобальный id>).
 - Доской управляешь через инструменты mcp__tracker__* (список/создание/правка/перенос задач, вопросы агентов, состояние пайплайна).
 - Задачи из колонки «В работу» выполняют отдельные агенты пайплайна, у каждой своя сессия. Сам задачи по коду не выполняй, если пользователь прямо об этом не попросил, — оформляй их задачами.
 - Код проекта читать можно, чтобы точнее формулировать задачи.
@@ -157,10 +159,20 @@ STATUS_NAMES = {"idle": "не запускалась", "queued": "в очере�
                 "waiting": "ждёт ответа", "done": "готово", "error": "ошибка", "interrupted": "прервано"}
 
 
+def task_label(t):
+    return f"{t['project_name']} #{t['task_number']}"
+
+
+def task_address(t):
+    return (f"Задача: {task_label(t)}. Технический task_id={t['id']}, project_id={t['project_id']}. "
+            "В MCP/API используй task_id; #номер служит только для показа внутри проекта.")
+
+
 def link_info(l):
     """Связанная задача для промпта и get_task: путь к отчёту — только если файл есть."""
     rp = l["report_path"] if l["report_path"] and Path(l["report_path"]).exists() else None
-    return {"id": l["id"], "title": l["title"], "column": l["column_name"], "status": l["status"],
+    return {"id": l["id"], "task_id": l["id"], "task_number": l["task_number"], "project_name": l["project_name"],
+            "title": l["title"], "column": l["column_name"], "status": l["status"],
             "project_id": l["project_id"], "project": l["project_name"], "summary": l["summary"], "report_path": rp}
 
 
@@ -177,13 +189,13 @@ def links_block(t, head="## Связанные задачи"):
         if l["project_id"] != t["project_id"]:
             where += f", проект «{l['project']}»"
         summary = (l["summary"] or "пока нет").strip().rstrip(".")
-        p += f"- #{l['id']} «{l['title']}» — {where}. Итог: {summary}. "
+        p += f"- {task_label(l)} «{l['title']}» (task_id={l['id']}, project_id={l['project_id']}) — {where}. Итог: {summary}. "
         p += f"Отчёт: {l['report_path']}\n" if l["report_path"] else "Отчёта нет.\n"
     return p.rstrip()
 
 
 def task_prompt(t, project):
-    p = f"# Задача #{t['id']}: {t['title']}\nПроект: {project['name']} ({project['path']})\n{git_line()}\n\n"
+    p = f"# Задача {project['name']} #{t['task_number']}: {t['title']}\nПроект: {project['name']} ({project['path']})\n{task_address(t)}\n{git_line()}\n\n"
     p += (t["description"] or "(описания нет)").strip()
     p += f"\n\nРезультат в Telegram: {'да' if t.get('telegram_notify') else 'нет'} (флаг этой задачи)."
     comments = db.q("SELECT text FROM events WHERE task_id=? AND kind='comment' ORDER BY id", (t["id"],))
@@ -193,7 +205,7 @@ def task_prompt(t, project):
 
 
 def rerun_prompt(t):
-    p = "Пользователь снова поставил эту задачу в работу.\n\n"
+    p = "Пользователь снова поставил эту задачу в работу.\n" + task_address(t) + "\n\n"
     p += f"Актуальный заголовок: {t['title']}\nАктуальное описание:\n{(t['description'] or '').strip()}\n"
     new = db.q("SELECT text FROM events WHERE task_id=? AND kind='comment' AND ts>? ORDER BY id",
                (t["id"], t["last_run_at"] or 0))
@@ -322,6 +334,8 @@ class Orchestrator:
             prompt = rerun_prompt(t)
         else:
             prompt = task_prompt(t, project)
+        if t["status"] == "resume" and t["pending_prompt"]:
+            prompt = task_address(t) + "\n\n" + prompt
         previous = t.get("last_provider") or ("claude" if db.one("SELECT session_id FROM tasks WHERE id=?", (t["id"],))["session_id"] else None)
         if previous and previous != AGENT:
             prompt = task_context(t) + "\n\n" + prompt
@@ -449,7 +463,7 @@ def _finish_task(tid, summary, report, telegram_text=None, telegram_files=None, 
         return  # повтор события завершения не создаёт новый отчёт или сообщение
     path = db.DATA / "reports" / f"task-{tid}.md"
     stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
-    md = f"# Задача #{tid}: {t['title']}\n\n"
+    md = f"# Задача {task_label(t)}: {t['title']}\n\nТехнический task_id: {tid}; project_id: {t['project_id']}.\n\n"
     md += f"**Проект:** {t['project_name']} · **Завершено:** {stamp}\n\n"
     md += f"## Итог\n\n{summary}\n\n## Отчёт\n\n{report}\n\n"
     md += "---\n\n### Служебное\n\n"
@@ -857,7 +871,9 @@ restart = Restart()
 
 # ---------------- обработчики MCP-инструментов ----------------
 def _task_brief(t):
-    return {"id": t["id"], "title": t["title"], "column": t["column_name"], "status": t["status"],
+    return {"id": t["id"], "task_id": t["id"], "task_number": t["task_number"],
+            "project_id": t["project_id"], "project_name": t["project_name"],
+            "title": t["title"], "column": t["column_name"], "status": t["status"],
             "summary": t["summary"], "links": [l["id"] for l in db.task_links(t["id"])]}
 
 
@@ -918,22 +934,23 @@ def _mcp(tool, a, tid, pid):
         links = [int(x) for x in a.get("links") or []]
         for x in links:
             if not db.get_task(x):
-                raise ValueError(f"Нет задачи #{x} для связи")
+                raise ValueError(f"Нет задачи с task_id={x} для связи")
         new = db.create_task(target, a["title"], a.get("description", ""), c["id"], telegram_notify=a.get("telegram_notify", False))
         for x in links:
             db.link_tasks(new, x)
         if c["kind"] == "todo":
             db.update_task(new, status="queued")
         if tid:
-            task_event(tid, "progress", f"Создана задача #{new}: {a['title']}")
+            task_event(tid, "progress", f"Создана задача {task_label(db.get_task(new))}: {a['title']}")
         changed_links(target, links)
-        return f"Создана задача #{new} в колонке «{c['name']}»" + (
-            ", связана с " + ", ".join(f"#{x}" for x in links) if links else "")
+        return J({**_task_brief(db.get_task(new)), "message": "Задача создана"})
     if tool == "list_projects":
         return J(db.q("SELECT id, name, path, active FROM projects ORDER BY id"))
     if tool == "list_tasks":
         target = int(a.get("project_id") or pid)
         rows = [db.get_task(r["id"]) for r in db.q("SELECT id FROM tasks WHERE project_id=? ORDER BY column_id, position", (target,))]
+        if a.get("task_number") is not None:
+            rows = [r for r in rows if r["task_number"] == int(a["task_number"])]
         if a.get("column"):
             c = _col(target, a["column"])
             rows = [r for r in rows if r["column_id"] == c["id"]]
@@ -942,7 +959,7 @@ def _mcp(tool, a, tid, pid):
         t = db.get_task(int(a["task_id"]))
         if not t:
             return "Нет такой задачи"
-        out = {k: t[k] for k in ("id", "title", "description", "column_name", "status", "summary", "error", "project_name", "telegram_notify")}
+        out = {k: t[k] for k in ("id", "task_id", "task_number", "project_id", "title", "description", "column_name", "status", "summary", "error", "project_name", "telegram_notify")}
         out["telegram_delivery"] = telegram_delivery(t["id"])
         if t["report_path"] and Path(t["report_path"]).exists():
             out["report"] = Path(t["report_path"]).read_text(encoding="utf-8")[:6000]
@@ -964,7 +981,7 @@ def _mcp(tool, a, tid, pid):
         if updated["telegram_notify"] and updated["status"] == "done" and updated["summary"] and not telegram_delivery(t["id"]):
             prepare_telegram(updated, updated["summary"])
         changed_links(t["project_id"], add + drop)
-        return "Обновлено" + (". Связи: " + (", ".join(f"#{l['id']}" for l in db.task_links(t["id"])) or "нет")
+        return "Обновлено" + (". Связи: " + (", ".join(task_label(l) + f" (task_id={l['id']})" for l in db.task_links(t["id"])) or "нет")
                               if add or drop else "")
     if tool == "move_task":
         t = db.get_task(int(a["task_id"]))
@@ -977,7 +994,8 @@ def _mcp(tool, a, tid, pid):
         return f"Перенесено в «{c['name']}»"
     if tool == "list_questions":
         rows = db.list_questions("open")
-        return J([{"question_id": r["id"], "task": f"#{r['task_id']} {r['task_title']}", "project": r["project_name"],
+        return J([{"question_id": r["id"], "task_id": r["task_id"], "task_number": r["task_number"], "project_id": r["project_id"],
+                   "task": f"{task_label(r)} {r['task_title']}", "project": r["project_name"],
                    "text": r["text"], "options": r["options"]} for r in rows]) if rows else "Открытых вопросов нет"
     if tool == "answer_question":
         return "Ответ отправлен" if answer_question(int(a["question_id"]), a["answer"]) else "Вопрос уже закрыт"
@@ -991,7 +1009,7 @@ def _mcp(tool, a, tid, pid):
         orch.set_enabled(bool(a["enabled"]))
         return "Пайплайн " + ("включён" if a["enabled"] else "выключается")
     if tool == "restart_tracker":
-        restart.request(f"задача #{tid}" if tid else f"чат проекта {pid}")
+        restart.request(f"задача {task_label(db.get_task(tid))} (task_id={tid})" if tid else f"чат проекта {pid}")
         if tid:
             task_event(tid, "system", "Запрошен перезапуск трекера")
         return ("Перезапуск запрошен: трекер перезапустится, когда завершатся все запуски агентов и чата, включая твой "

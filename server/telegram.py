@@ -47,7 +47,8 @@ def prepare(t, summary, text=None, files=None, staged=False):
         return
     token = uuid.uuid4().hex
     folder = RESULTS / token
-    header = f"#{t['id']} · {t['title']}\n{t['project_name']}\n\n"
+    label = f"{t['project_name']} #{t['task_number']}"
+    header = f"{label} · {t['title']}\n\n"
     body = (text or summary or "Задача выполнена.").strip()
     parts = [{"text": (header + body)[:3500], "files": []}]
     error = None
@@ -68,7 +69,7 @@ def prepare(t, summary, text=None, files=None, staged=False):
                 raise ValueError("Лимит материалов: 100 МБ на файл, 300 МБ суммарно.")
             target = folder / f"{i + 1}-{f.name}"
             shutil.copyfile(f, target)
-            parts.append({"text": f"#{t['id']} · {f.name}"[:800], "files": [target.relative_to(ROOT).as_posix()]})
+            parts.append({"text": f"{label} · {f.name}"[:800], "files": [target.relative_to(ROOT).as_posix()]})
     except (OSError, ValueError, TypeError):
         # Результат задачи остаётся успешным даже при потере исходного файла.
         error = "Не удалось сохранить вложения. Проверьте файлы и подготовьте материалы заново."

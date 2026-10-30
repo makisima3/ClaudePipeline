@@ -227,23 +227,25 @@ def api_task(h, body, query, tid):
     t["telegram_delivery"] = telegram_delivery(tid)
     transcript = pl.transcript_path(t["project_path"], t["session_id"])
     t["transcript"] = str(transcript) if transcript else None
-    t["links"] = [{k: l[k] for k in ("id", "title", "status", "column_name", "column_kind", "project_id", "project_name")}
+    t["links"] = [{k: l[k] for k in ("id", "task_id", "task_number", "title", "status", "column_name", "column_kind", "project_id", "project_name")}
                   for l in db.task_links(tid)]
     return t
 
 
 @route("GET", "/api/tasks")
 def api_task_search(h, body, query):
-    """Поиск задач для связи: по номеру (#12 или 12) или части заголовка, во всех проектах."""
+    """Локальный номер или заголовок; project_id ограничивает поиск одним проектом."""
     s = (query.get("q") or [""])[0].strip().lstrip("#").casefold()
+    project_id = (query.get("project_id") or [""])[0]
+    need(not project_id or project_id.isdigit(), "project_id должен быть числом", 400)
     skip = {int(x) for x in (query.get("exclude") or [""])[0].split(",") if x.isdigit()}
     if not s:
         return []
-    rows = db.q("""SELECT t.id, t.title, t.status, t.project_id, c.name AS column_name, p.name AS project_name
+    rows = db.q("""SELECT t.id, t.id AS task_id, t.task_number, t.title, t.status, t.project_id, c.name AS column_name, p.name AS project_name
                    FROM tasks t JOIN columns c ON c.id=t.column_id JOIN projects p ON p.id=t.project_id
-                   ORDER BY t.id DESC""")
-    hit = [r for r in rows if r["id"] not in skip and (str(r["id"]) == s or s in r["title"].casefold())]
-    hit.sort(key=lambda r: str(r["id"]) != s)  # точное совпадение номера — первым
+                   WHERE (?='' OR t.project_id=?) ORDER BY t.id DESC""", (project_id, project_id))
+    hit = [r for r in rows if r["id"] not in skip and
+           (str(r["task_number"]) == s if s.isdigit() else s in r["title"].casefold())]
     return hit[:12]
 
 
@@ -348,7 +350,8 @@ def api_task_delete(h, body, query, tid):
 def api_task_report(h, body, query, tid):
     t = db.get_task(tid)
     need(t and t["report_path"] and Path(t["report_path"]).exists(), "Отчёта пока нет")
-    return {"title": t["title"], "markdown": Path(t["report_path"]).read_text(encoding="utf-8")}
+    return {**{k: t[k] for k in ("task_id", "task_number", "project_id", "project_name", "title")},
+            "markdown": Path(t["report_path"]).read_text(encoding="utf-8")}
 
 
 @route("GET", r"/api/tasks/(\d+)/rawlog")

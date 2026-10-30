@@ -21,7 +21,8 @@ def S(props, required=()):
 
 STR = {"type": "string"}
 INT = {"type": "integer"}
-IDS = {"type": "array", "items": INT}
+TASK_ID_SCHEMA = {"type": "integer", "description": "Глобальный технический task_id (он же id), НЕ локальный task_number. Сначала получи его из list_tasks/create_task/get_task."}
+IDS = {"type": "array", "items": TASK_ID_SCHEMA, "description": "Глобальные технические task_id; не пользовательские номера."}
 BOOL = {"type": "boolean"}
 
 APPROVE = {
@@ -33,14 +34,14 @@ CREATE_TASK = {
     "name": "create_task",
     "description": "Создать задачу в трекере. column: 'backlog' (по умолчанию), 'todo' (сразу в работу) или имя колонки. "
                    "project_id — если не текущий проект. links — id задач, нужных для контекста: связь видна в обеих "
-                   "карточках, а агент получит их итоги и пути к отчётам.",
+                   "карточках, а агент получит их итоги и пути к отчётам. Возвращает task_id (глобальный), task_number (в проекте), project_id, project_name.",
     "inputSchema": S({"title": STR, "description": STR, "column": STR, "project_id": INT, "links": IDS,
                       "telegram_notify": {"type": "boolean", "description": "Отправить результат в Избранное: настройка устройства или явная просьба."}}, ["title"]),
 }
 GET_TASK = {
     "name": "get_task",
-    "description": "Подробности задачи: описание, статус, итог, отчёт, последние события, вопросы, связанные задачи.",
-    "inputSchema": S({"task_id": INT}, ["task_id"]),
+    "description": "Подробности по глобальному task_id: описание, статус, итог, отчёт, события, вопросы, связи. Возвращает task_id, task_number, project_id, project_name. Локальный номер сюда не передавай.",
+    "inputSchema": S({"task_id": TASK_ID_SCHEMA}, ["task_id"]),
 }
 RESTART = {
     "name": "restart_tracker",
@@ -83,21 +84,21 @@ CHAT_TOOLS = [
     {"name": "list_projects", "description": "Список проектов трекера.", "inputSchema": S({})},
     {
         "name": "list_tasks",
-        "description": "Задачи проекта (по умолчанию текущего). column — фильтр по kind или имени колонки.",
-        "inputSchema": S({"project_id": INT, "column": STR}),
+        "description": "Задачи проекта (по умолчанию текущего). task_number — точный локальный #номер в этом проекте; column — колонка. Возвращает task_id (глобальный id), task_number, project_id, project_name. Для команд используй task_id результата.",
+        "inputSchema": S({"project_id": INT, "task_number": {"type": "integer", "minimum": 1, "description": "Локальный номер в выбранном проекте"}, "column": STR}),
     },
     GET_TASK,
     CREATE_TASK,
     {
         "name": "update_task",
         "description": "Изменить заголовок/описание задачи, telegram_notify — отправку результата в Избранное. links — связать с задачами (id), unlink — убрать связи.",
-        "inputSchema": S({"task_id": INT, "title": STR, "description": STR, "links": IDS, "unlink": IDS,
+        "inputSchema": S({"task_id": TASK_ID_SCHEMA, "title": STR, "description": STR, "links": IDS, "unlink": IDS,
                           "telegram_notify": BOOL}, ["task_id"]),
     },
     {
         "name": "move_task",
         "description": "Переместить задачу в колонку: backlog, todo (в работу), done или имя колонки.",
-        "inputSchema": S({"task_id": INT, "column": STR}, ["task_id", "column"]),
+        "inputSchema": S({"task_id": TASK_ID_SCHEMA, "column": STR}, ["task_id", "column"]),
     },
     {"name": "list_questions", "description": "Открытые вопросы агентов, ждущие ответа.", "inputSchema": S({})},
     {
