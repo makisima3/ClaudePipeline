@@ -14,6 +14,7 @@ from pathlib import Path
 import db
 from runner import CLAUDE, NO_WINDOW, ClaudeRun, short_tool
 from runtime import AGENT, NAME
+from telegram import telegram, prepare as prepare_telegram, delivery as telegram_delivery
 
 
 CODEX_SYSTEM = """Используй доступные инструменты Codex для файлов и команд, view_image для изображений.
@@ -37,6 +38,8 @@ def preflight():
 
 def active_runs():
     runs = list(orch.runs.values()) + list(chat.runs.values())
+    if telegram.busy:
+        runs.append(telegram)
     if AGENT == "codex":
         from codex_runner import active_runs as codex_active
         runs += codex_active()
@@ -121,6 +124,7 @@ TASK_SYSTEM = """Ты — исполнитель задач в личном па
 - Git. Режим указан в промпте задачи строкой «Git: …». Если он не off и папка проекта — git-репозиторий: в начале посмотри `git status`, чтобы отличать чужие незакоммиченные изменения от своих; в конце, перед finish_task, закоммить ТОЛЬКО изменения своей задачи с сообщением `#<id> <заголовок задачи>` и 2–5 строками, что сделано. Не связанные между собой изменения — отдельными коммитами. Файлы добавляй явно по путям (общий файл — по кускам: `git diff` → свой патч → `git apply --cached`), без `git add -A`. Чужие незакоммиченные изменения не трогай, не откатывай и не включай — упомяни их в отчёте. В режиме commit_push после коммита сделай `git push` без force; если push не прошёл (нет сети, конфликт, отказ), ничего не обходи (никаких force, rebase, reset) — напиши об этом в отчёте. Режим off или папка не git-репозиторий — git не трогай.
 - Для Git используй существующую авторизацию и конфигурацию проекта. Интерактивный вход пользователь проходит сам; не перенастраивай доступ без его просьбы. Не выводи токены/ключи и URL с секретами в UI, логи или отчёт; ошибку push описывай понятной причиной без секретов. Вход gh или успешное чтение не гарантируют право записи в репозиторий/ветку. Если конфигурация push включает mirror или принудительные refspec, push пропусти и объясни причину в отчёте.
 - В конце ОБЯЗАТЕЛЬНО вызови mcp__tracker__finish_task: summary — 1-3 предложения, report — подробный markdown (что сделано и как, изменённые файлы, как проверить, принятые решения, открытые вопросы).
+- Если для задачи включён Telegram или пользователь явно просит прислать результат в ТГ, подготовь в finish_task telegram_text (кратко: что сделано и что действительно проверено) и telegram_files (пути к материалам). Для визуальных изменений, особенно игровых, приложи скриншоты; короткое видео — когда оно помогает показать движение/взаимодействие и его реально можно записать. О пройденных тестах пиши только если они запускались и прошли. Явную просьбу учти через telegram_notify=true. Файлы должны существовать при вызове finish_task: трекер скопирует их и сам доставит после выхода агента, напрямую ничего не отправляй. Инструкция: {telegram_guide}.
 - Если задача меняла код самого трекера AgentPipeline (папка server/), после finish_task вызови mcp__tracker__restart_tracker: трекер перезапустится сам, когда твой процесс завершится. Сервер трекера руками не останавливай и не перезапускай.
 - Пиши по-русски."""
 
@@ -131,6 +135,7 @@ CHAT_SYSTEM = """Ты — ассистент, встроенный в личны
 - Задачи из колонки «В работу» выполняют отдельные агенты пайплайна, у каждой своя сессия. Сам задачи по коду не выполняй, если пользователь прямо об этом не попросил, — оформляй их задачами.
 - Код проекта читать можно, чтобы точнее формулировать задачи.
 - Хорошая задача: короткий заголовок + описание с контекстом и критериями готовности.
+- В create_task всегда передавай telegram_notify из настройки устройства в текущем сообщении. Явная просьба прислать результат в Telegram включает telegram_notify=true для конкретной задачи, даже при выключенной настройке; при редактировании передавай её в update_task. Общая настройка относится только к новым задачам, старые массово не меняй.
 - Если пользователь вставил текст из другого трекера — разбери его на задачи и создай их.
 - Отвечай кратко, по-русски."""
 
@@ -180,6 +185,7 @@ def links_block(t, head="## Связанные задачи"):
 def task_prompt(t, project):
     p = f"# Задача #{t['id']}: {t['title']}\nПроект: {project['name']} ({project['path']})\n{git_line()}\n\n"
     p += (t["description"] or "(описания нет)").strip()
+    p += f"\n\nРезультат в Telegram: {'да' if t.get('telegram_notify') else 'нет'} (флаг этой задачи)."
     comments = db.q("SELECT text FROM events WHERE task_id=? AND kind='comment' ORDER BY id", (t["id"],))
     if comments:
         p += "\n\n## Комментарии пользователя\n" + "\n".join(f"- {c['text']}" for c in comments)
@@ -196,6 +202,7 @@ def rerun_prompt(t):
     links = links_block(t, "Связанные задачи (актуально):")
     if links:
         p += links + "\n"
+    p += f"\nРезультат в Telegram: {'да' if t.get('telegram_notify') else 'нет'} (флаг этой задачи)."
     p += f"\n{git_line()}\nПродолжи работу с учётом этого и в конце снова вызови finish_task."
     return p
 
@@ -310,7 +317,7 @@ class Orchestrator:
             return
         resume = bool(t["session_id"])
         if t["status"] == "resume" and t["pending_prompt"]:
-            prompt = t["pending_prompt"]
+            prompt = t["pending_prompt"] + f"\nРезультат в Telegram: {'да' if t['telegram_notify'] else 'нет'} (актуальный флаг задачи)."
         elif resume:
             prompt = rerun_prompt(t)
         else:
@@ -320,7 +327,7 @@ class Orchestrator:
             prompt = task_context(t) + "\n\n" + prompt
         session_id = t["session_id"] or (str(uuid.uuid4()) if AGENT == "claude" else None)
         s = db.get_settings()
-        system = TASK_SYSTEM
+        system = TASK_SYSTEM.replace("{telegram_guide}", str(db.ROOT / "docs/telegram-results.md"))
         if AGENT == "codex":
             system = system.replace("(инструмент Agent)", "(доступные инструменты подагентов Codex)") + "\n" + CODEX_SYSTEM
         system +=  (f"\n\nДополнительные указания пользователя:\n{s['extra_prompt']}" if s["extra_prompt"].strip() else "")
@@ -426,8 +433,20 @@ class Orchestrator:
 orch = Orchestrator()
 
 
-def finish_task(tid, summary, report):
+def finish_task(tid, summary, report, telegram_text=None, telegram_files=None, telegram_notify=None):
+    with orch.lock:
+        return _finish_task(tid, summary, report, telegram_text, telegram_files, telegram_notify)
+
+
+def _finish_task(tid, summary, report, telegram_text=None, telegram_files=None, telegram_notify=None):
     t = db.get_task(tid)
+    if telegram_notify is True:
+        db.update_task(tid, telegram_notify=1)
+        t["telegram_notify"] = 1
+    if t["telegram_notify"]:
+        prepare_telegram(t, summary, telegram_text, telegram_files, staged=t["status"] != "done")
+    if t["status"] == "done" and t["summary"] == summary:
+        return  # повтор события завершения не создаёт новый отчёт или сообщение
     path = db.DATA / "reports" / f"task-{tid}.md"
     stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
     md = f"# Задача #{tid}: {t['title']}\n\n"
@@ -444,7 +463,16 @@ def finish_task(tid, summary, report):
         prev = path.read_text(encoding="utf-8")
         md += "\n\n---\n\n<details><summary>Предыдущий отчёт</summary>\n\n" + prev + "\n\n</details>\n"
     path.write_text(md, encoding="utf-8")
-    db.move_task(tid, "done", status="done", summary=summary, report_path=str(path))
+    with db._lock:
+        db._conn.execute("BEGIN IMMEDIATE")
+        try:
+            db.move_task(tid, "done", status="done", summary=summary, report_path=str(path))
+            db.ex("""UPDATE telegram_deliveries SET state=CASE WHEN error IS NULL THEN 'pending' ELSE 'error' END
+                     WHERE task_id=? AND run_key=? AND state='prepared'""", (tid, str(t["last_run_at"] or t["created_at"])))
+            db._conn.execute("COMMIT")
+        except BaseException:
+            db._conn.execute("ROLLBACK")
+            raise
     task_event(tid, "finish", summary)
     changed(t["project_id"])
 
@@ -539,7 +567,7 @@ class Chat:
         titler.request(cid)
         return True
 
-    def send(self, cid, text, attachments=None):
+    def send(self, cid, text, attachments=None, telegram_notify=False):
         """attachments — уже сохранённые файлы: [{name, file, size, type}] в db.chat_dir(pid, cid)."""
         if cid in self.runs or restart.since:
             return False
@@ -568,6 +596,9 @@ class Chat:
                 files = "\n".join(str(folder / a["file"]) for a in m["attachments"])
                 history.append(m["role"] + ": " + (m["text"] or "") + ("\nФайлы: " + files if files else ""))
             prompt = "Контекст чата с другим исполнителем:\n" + "\n\n".join(history) + "\n\nТекущее сообщение:\n" + prompt
+        prompt += ("\n\nНастройка устройства для НОВЫХ задач из этого сообщения: telegram_notify="
+                   + ("true" if telegram_notify else "false")
+                   + ". Передавай её в create_task; явная просьба о Telegram важнее. Флаги старых задач не меняй без просьбы.")
         sid = c["session_id"] or (str(uuid.uuid4()) if AGENT == "claude" else None)
         db.set_chat_session(cid, sid)
         s = db.get_settings()
@@ -853,6 +884,8 @@ def mcp_call(body):
 
 def _mcp(tool, a, tid, pid):
     J = lambda x: json.dumps(x, ensure_ascii=False, indent=1)
+    if "telegram_notify" in a and not isinstance(a["telegram_notify"], bool):
+        raise ValueError("telegram_notify должен быть логическим значением")
     if tool == "ask_user":
         opts = [o for o in (a.get("options") or []) if str(o).strip()]
         qid = db.add_question(tid, a["question"], opts)
@@ -866,7 +899,7 @@ def _mcp(tool, a, tid, pid):
         task_event(tid, "progress", a["text"])
         return "Ок"
     if tool == "finish_task":
-        finish_task(tid, a["summary"], a["report"])
+        finish_task(tid, a["summary"], a["report"], a.get("telegram_text"), a.get("telegram_files"), a.get("telegram_notify"))
         return "Задача закрыта, отчёт сохранён. Заверши ход."
     if tool == "approve":
         if not tid:  # чат: разрешаем, пользователь сам на странице
@@ -886,7 +919,7 @@ def _mcp(tool, a, tid, pid):
         for x in links:
             if not db.get_task(x):
                 raise ValueError(f"Нет задачи #{x} для связи")
-        new = db.create_task(target, a["title"], a.get("description", ""), c["id"])
+        new = db.create_task(target, a["title"], a.get("description", ""), c["id"], telegram_notify=a.get("telegram_notify", False))
         for x in links:
             db.link_tasks(new, x)
         if c["kind"] == "todo":
@@ -909,7 +942,8 @@ def _mcp(tool, a, tid, pid):
         t = db.get_task(int(a["task_id"]))
         if not t:
             return "Нет такой задачи"
-        out = {k: t[k] for k in ("id", "title", "description", "column_name", "status", "summary", "error", "project_name")}
+        out = {k: t[k] for k in ("id", "title", "description", "column_name", "status", "summary", "error", "project_name", "telegram_notify")}
+        out["telegram_delivery"] = telegram_delivery(t["id"])
         if t["report_path"] and Path(t["report_path"]).exists():
             out["report"] = Path(t["report_path"]).read_text(encoding="utf-8")[:6000]
         out["events"] = [f"{e['kind']}: {e['text'][:300]}" for e in db.task_events(t["id"], limit=30)]
@@ -925,7 +959,10 @@ def _mcp(tool, a, tid, pid):
             db.link_tasks(t["id"], x)
         for x in drop:
             db.unlink_tasks(t["id"], x)
-        db.update_task(t["id"], **{k: a[k] for k in ("title", "description") if a.get(k) is not None})
+        db.update_task(t["id"], **{k: a[k] for k in ("title", "description", "telegram_notify") if a.get(k) is not None})
+        updated = db.get_task(t["id"])
+        if updated["telegram_notify"] and updated["status"] == "done" and updated["summary"] and not telegram_delivery(t["id"]):
+            prepare_telegram(updated, updated["summary"])
         changed_links(t["project_id"], add + drop)
         return "Обновлено" + (". Связи: " + (", ".join(f"#{l['id']}" for l in db.task_links(t["id"])) or "нет")
                               if add or drop else "")
@@ -977,13 +1014,14 @@ IMPORT_SCHEMA = {
     "type": "object",
     "properties": {"tasks": {"type": "array", "items": {
         "type": "object",
-        "properties": {"title": {"type": "string"}, "description": {"type": "string"}},
-        "required": ["title", "description"]}}},
+        "properties": {"title": {"type": "string"}, "description": {"type": "string"}, "telegram_notify": {"type": "boolean"}},
+        "required": ["title", "description", "telegram_notify"]}}},
     "required": ["tasks"],
 }
 
 IMPORT_PROMPT = """Ниже текст, скопированный из другого трекера, заметок или переписки. Разбери его на отдельные задачи для канбан-доски.
 Для каждой задачи: короткий понятный заголовок (до 80 символов) и описание, где сохранено всё полезное из исходника: детали, шаги воспроизведения, критерии, ссылки, номера тикетов. Ничего не выдумывай. Если задача в тексте одна — верни одну. Файлы и инструменты не используй, просто разбери текст. Пиши по-русски (термины и цитаты оставляй как есть).
+telegram_notify=true только для задач, для которых в исходнике явно просят прислать результат в Telegram/ТГ; иначе false. Просьбу сохрани также в описании.
 
 ---
 {text}"""

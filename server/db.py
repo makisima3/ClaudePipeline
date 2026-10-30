@@ -1,5 +1,6 @@
 """SQLite-хранилище трекера. Один connection на процесс, доступ под общим замком."""
 import json
+import re
 from runtime import AGENT
 import sqlite3
 import threading
@@ -63,6 +64,13 @@ CREATE TABLE IF NOT EXISTS task_links (  -- связь двусторонняя,
     created_at REAL, PRIMARY KEY (task_id, linked_id)
 );
 CREATE INDEX IF NOT EXISTS task_links_linked ON task_links(linked_id);
+CREATE TABLE IF NOT EXISTS telegram_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    run_key TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+    next_part INTEGER NOT NULL DEFAULT 0, error TEXT, created_at REAL, updated_at REAL,
+    UNIQUE(task_id, run_key)
+);
 """
 
 DEFAULT_SETTINGS = {
@@ -78,6 +86,9 @@ DEFAULT_SETTINGS = {
     "pause_estimated": "0",
     "update_check_minutes": "60",     # проверка обновлений на GitHub, 0 — только вручную
     "git_mode": "commit_push",        # off | commit | commit_push — что агент делает с git в конце задачи
+    "telegram_auth": "unconfigured",  # готовность подтверждается браузером, отдельно от выбора устройства
+    "telegram_error": "",
+    "telegram_test_at": "0",
 }
 
 PROVIDER_SETTINGS = {"model", "effort", "chat_model", "permission_mode", "pause_until", "pause_estimated"}
@@ -104,6 +115,8 @@ with _lock:
             if field not in existing:
                 _conn.execute(f"ALTER TABLE {table} ADD COLUMN {field} TEXT")
     # миграции старых баз
+    if "telegram_notify" not in {r["name"] for r in _conn.execute("PRAGMA table_info(tasks)")}:
+        _conn.execute("ALTER TABLE tasks ADD COLUMN telegram_notify INTEGER NOT NULL DEFAULT 0")
     if "attachments" not in {r["name"] for r in _conn.execute("PRAGMA table_info(chat_messages)")}:
         _conn.execute("ALTER TABLE chat_messages ADD COLUMN attachments TEXT")
     if "chat_id" not in {r["name"] for r in _conn.execute("PRAGMA table_info(chat_messages)")}:
@@ -242,20 +255,43 @@ def set_chat_session(cid, sid):
     ex(f"UPDATE chats SET {session_column()}=? WHERE id=?", (sid, cid))
 
 
-def create_task(project_id, title, description="", column_id=None, model=None, effort=None):
+def telegram_requested(text):
+    """Прямые просьбы из формы; более сложное намерение передаёт агент чата флагом."""
+    for clause in re.split(r"[.!?;\n]", text.casefold()):
+        action = (r"\b(?:скин(?:ь(?:те)?|уть)|скид(?:ывай(?:те)?|ывать)|пришл(?:и(?:те)?|[её]шь)|прислать|"
+                  r"отправ(?:ь(?:те)?|ить|ля(?:й(?:те)?|ть))|вышл(?:и(?:те)?|ешь)|выслать|"
+                  r"перешл(?:и(?:те)?|[её]шь)|переслать|(?:про)?дублир(?:уй(?:те)?|овать))\b")
+        target = r"(?:\bтг\b|телеграм\w*|\btelegram\b)"
+        for match in re.finditer(action, clause):
+            if re.search(r"\bне\s+(?:(?:надо|нужно|следует|стоит|хочу)\s+)?$", clause[:match.start()]):
+                continue
+            nearby = clause[max(0, match.start() - 120):match.end() + 120]
+            if re.search(target, nearby):
+                return True
+    return False
+
+
+def create_task(project_id, title, description="", column_id=None, model=None, effort=None, telegram_notify=False):
     if column_id is None:
         column_id = column_by_kind(project_id, "backlog")["id"]
     pos = one("SELECT COALESCE(MAX(position), 0) + 1 AS p FROM tasks WHERE column_id=?", (column_id,))["p"]
     t = now()
     tid = ex("""INSERT INTO tasks(project_id, column_id, title, description, position, created_at, updated_at)
                  VALUES(?,?,?,?,?,?,?)""", (project_id, column_id, title, description, pos, t, t))
-    update_task(tid, model=model or None, effort=effort or None)
+    update_task(tid, model=model or None, effort=effort or None,
+                telegram_notify=int(bool(telegram_notify) or telegram_requested(title + "\n" + description)))
     return tid
 
 
 def update_task(tid, **fields):
     if not fields:
         return
+    if "title" in fields or "description" in fields:
+        old = one("SELECT title, description FROM tasks WHERE id=?", (tid,))
+        if old and any(k in fields and fields[k] != old[k] for k in ("title", "description")):
+            text = str(fields.get("title", old["title"])) + "\n" + str(fields.get("description", old["description"]))
+            if telegram_requested(text):
+                fields["telegram_notify"] = 1
     if AGENT == "codex":
         fields = {("codex_" + k if k in ("session_id", "model", "effort") else k): v for k, v in fields.items()}
     fields["updated_at"] = now()

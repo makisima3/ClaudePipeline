@@ -5,6 +5,32 @@ const ls = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { } },
 };
 
+function telegramDefault() {
+  const saved = ls.get("telegram.results", null);
+  if (typeof saved === "boolean") return saved;
+  return navigator.userAgentData?.mobile === true || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function telegramDeviceControl() {
+  const ready = S.state?.telegram?.auth === "ready";
+  return `<label class="telegram-choice"><input type="checkbox" ${telegramDefault() ? "checked" : ""}
+    onchange="App.setTelegramDefault(this.checked)"> Результаты в Telegram</label>
+    ${!ready ? '<button class="ghost" onclick="App.openTelegramSettings()">Подключить Telegram</button>' : ""}`;
+}
+
+function setTelegramDefault(value) {
+  ls.set("telegram.results", value);
+  document.querySelectorAll('.telegram-device .telegram-choice input').forEach(el => el.checked = value);
+  if (value && S.state?.telegram?.auth !== "ready") openTelegramSettings();
+}
+
+function telegramTaskChoice(id, checked) {
+  return `<label class="telegram-choice"><input type="checkbox" id="${id}" ${checked ? "checked" : ""}
+    ${id === "tt-telegram" ? 'onchange="App.setTaskTelegram(this.checked)"' : ""}> Отправить результат в Telegram</label>
+    ${S.state?.telegram?.auth !== "ready" ? '<div class="hint">Нужно подключить свой аккаунт. <a href="/?setup=telegram" target="_blank" rel="noopener">Настроить Telegram →</a></div>' : ""}`;
+}
+
 const STATUS = {
   idle: null, queued: ["в очереди", "st-queued"], running: ["выполняется", "st-running"], resume: ["продолжит", "st-resume"],
   waiting: ["ждёт ответа", "st-waiting"], done: ["готово", "st-done"], error: ["ошибка", "st-error"],
@@ -63,6 +89,7 @@ async function loadState() {
   const st = await api("GET", "/api/state");
   if (!ok()) return;
   if (bootChanged(st.boot_id)) return;
+  const telegramChanged = JSON.stringify(S.state?.telegram) !== JSON.stringify(st.telegram);
   S.state = st;
   document.documentElement.dataset.agent = st.agent === "codex" ? "codex" : "claude";
   if (st.agent_info?.models?.length) {
@@ -74,6 +101,7 @@ async function loadState() {
   if (logo) logo.innerHTML = '<span class="mark">≡</span>AgentPipeline · ' + esc(st.agent_name || "Claude");
   if (!project() && S.state.projects.length) S.projectId = S.state.projects[0].id;
   renderHeader();
+  if (telegramChanged && S.view === "settings") renderTelegramSettings();
 }
 
 async function loadBoard() {
@@ -129,6 +157,7 @@ function renderHeader() {
   document.querySelectorAll(".nav [data-view]").forEach(b => b.classList.toggle("active", b.dataset.view === S.view));
   $("#qbadge").innerHTML = st.open_questions ? `<span class="badge">${st.open_questions}</span>` : "";
   $("#chatBtn").classList.toggle("active", S.chatOpen);
+  document.querySelectorAll(".telegram-device").forEach(el => el.innerHTML = telegramDeviceControl());
   const pl = st.pipeline, tg = $("#ptoggle");
   tg.classList.toggle("on", pl.enabled === "1");
   tg.classList.toggle("stopping", pl.enabled === "stopping");
@@ -166,6 +195,7 @@ function renderBoard() {
       <span class="dot" style="background:${p.color}"></span><h2>${esc(p.name)}</h2>
       <span class="path">${esc(p.path)}</span>
       <span class="grow"></span>
+      <div class="telegram-device">${telegramDeviceControl()}</div>
       <label class="row" style="margin:0;color:var(--text);font-size:13px" title="Брать ли задачи этого проекта в работу">
         <input type="checkbox" style="width:auto" ${p.active ? "checked" : ""} onchange="App.setProjectActive(this.checked)"> участвует в пайплайне</label>
       <button onclick="App.importDialog()">Импорт текстом</button>
@@ -245,6 +275,7 @@ function newTask(columnId) {
       <div class="row"><div class="grow"><label>Модель</label><select id="nt-model" onchange="App.taskModelChanged('nt')">${opts(MODELS)}</select></div>
         <div class="grow"><label>Effort</label><select id="nt-effort">${opts(effortList())}</select></div></div>
     </div>
+    ${telegramTaskChoice("nt-telegram", telegramDefault())}
     <div class="actions"><button onclick="App.closeModal()">Отмена</button><button class="primary" onclick="App.createTask()">Создать</button></div>`);
   setTimeout(() => $("#nt-title").focus(), 0);
 }
@@ -254,6 +285,7 @@ async function createTask() {
   if (!title) return toast("Нужен заголовок");
   await api("POST", `/api/projects/${S.projectId}/tasks`, {
     title, description: $("#nt-desc").value, column_id: +$("#nt-col").value, model: $("#nt-model").value, effort: $("#nt-effort").value,
+    telegram_notify: $("#nt-telegram").checked,
   });
   closeModal(); loadBoard();
 }
@@ -268,6 +300,7 @@ async function openTask(id) {
     <div class="row muted" style="font-size:12px;margin:2px 4px 0" id="tt-line"></div>
     <label>Описание</label><textarea id="tt-desc" rows="6" oninput="App.renderRefs()">${esc(t.description || "")}</textarea>
     <div class="refs muted" id="tt-refs"></div>
+    ${telegramTaskChoice("tt-telegram", !!t.telegram_notify)}
     <div class="row" style="align-items:flex-end">
       <div class="grow"><label>Модель</label><select id="tt-model" onchange="App.taskModelChanged('tt')">${opts(MODELS, t.model)}</select></div>
       <div class="grow"><label>Effort</label><select id="tt-effort">${opts(effortList(t.model), t.effort)}</select></div>
@@ -338,6 +371,17 @@ function renderTaskDyn() {
   let html = "";
   if (t.status === "error" && t.error) html += `<div class="callout err">${esc(t.error)}</div>`;
   if (t.summary) html += `<div class="callout ok"><b>Итог:</b> ${esc(t.summary)} ${t.report_path ? ` · <a href="/report/${t.id}" target="_blank">подробный отчёт →</a>` : ""}</div>`;
+  const d = t.telegram_delivery;
+  if (d) {
+    const names = {pending: "в очереди", sending: "отправляется", sent: "отправлено в Избранное", error: "ошибка доставки", uncertain: "нужно проверить Избранное"};
+    html += `<div class="callout ${["error", "uncertain"].includes(d.state) ? "err" : ""}"><b>Telegram:</b> ${names[d.state] || esc(d.state)}
+      ${!t.telegram_notify && d.state === "pending" ? " · отправка выключена в задаче" : ""}
+      ${d.error ? `<div>${esc(d.error)}</div>` : ""}
+      ${d.state === "error" ? `<button onclick="App.retryTelegram()">Повторить доставку</button>` : ""}
+      ${d.state === "uncertain" ? `<div class="hint">Проверь часть ${d.next_part + 1} из ${d.parts} с меткой <code>${esc(d.marker || "AP")}</code> в Избранном. Подтверждённые ранее части повторно не отправляются.</div>
+        <button onclick="App.retryTelegram('received')">Последняя часть получена</button>
+        <button onclick="App.retryTelegram('resend')">Её нет — повторить</button>` : ""}</div>`;
+  }
   if (open.length) html += `<label>Ждёт ответа</label>` + open.map(q => questionHtml(q, false)).join("");
   $("#tt-dyn").innerHTML = html;
   renderLinks();
@@ -359,7 +403,25 @@ function evHtml(e) {
 async function saveTask() {
   const t = S.task;
   await api("PATCH", `/api/tasks/${t.id}`, { title: $("#tt-title").value, description: $("#tt-desc").value, model: $("#tt-model").value, effort: $("#tt-effort").value });
-  toast("Сохранено"); loadBoard();
+  toast("Сохранено"); loadBoard(); await refreshTask();
+  if ($("#tt-telegram")) $("#tt-telegram").checked = !!S.task.telegram_notify;
+}
+
+async function setTaskTelegram(value) {
+  const t = S.task;
+  try {
+    await api("PATCH", `/api/tasks/${t.id}`, {telegram_notify: value});
+    await refreshTask();
+    if (value && S.state?.telegram?.auth !== "ready") toast("Флаг сохранён. Подключи Telegram в настройках.");
+  } catch {
+    if ($("#tt-telegram")) $("#tt-telegram").checked = !!t.telegram_notify;
+  }
+}
+
+async function retryTelegram(resolution) {
+  if (resolution === "resend" && !confirm("Последняя часть точно отсутствует в Избранном? Повтор может создать дубль, если Telegram уже её принял.")) return;
+  await api("POST", `/api/tasks/${S.task.id}/telegram/retry`, {resolution});
+  await refreshTask();
 }
 
 async function refreshTask() {
@@ -371,6 +433,7 @@ async function refreshTask() {
   const same = JSON.stringify({ ...t, events: 0 }) === JSON.stringify({ ...S.task, events: 0 });
   S.task = t;
   if (!same) renderTaskDyn();  // перерисовка стёрла бы набранный в карточке ответ
+  if ($("#tt-telegram")) $("#tt-telegram").checked = !!t.telegram_notify;
 }
 
 async function comment() {
@@ -432,6 +495,7 @@ function renderSettings() {
   const s = S.state.settings, p = project();
   $("#view").innerHTML = `<div class="pad">
     <h2>Настройки · ${esc(S.state.agent_name)}</h2>
+    <div class="section" id="telegram-settings"></div>
     <div class="section"><h3>Выключение пайплайна</h3>
       <label class="radio"><input type="radio" name="stop" value="graceful" ${s.stop_mode === "graceful" ? "checked" : ""} onchange="App.setSetting('stop_mode','graceful')">
         <span><b>Доделать текущие задачи</b> и выключиться<div class="hint">Новые задачи не берутся, начатые завершаются.</div></span></label>
@@ -480,7 +544,59 @@ function renderSettings() {
     </div>` : ""}
   </div>`;
   renderUpdateSection();
+  renderTelegramSettings();
   if (s.git_mode === "commit_push" && p) checkGitReadiness();
+}
+
+let telegramPoll = null;
+function renderTelegramSettings() {
+  const box = $("#telegram-settings");
+  if (!box) return;
+  const t = S.state.telegram || {auth: "unconfigured"};
+  const names = {unconfigured: "Не подключён", unknown: "Нужна проверка сессии", checking: "Проверяем сессию…", login: "Ожидаем вход…",
+    ready: "Авторизация проверена · получатель: Избранное", auth_required: "Нужно войти заново", error: "Подключение требует внимания", uncertain: "Проверь тестовое сообщение в Избранном"};
+  box.innerHTML = `<h3>Telegram → Избранное</h3>
+    <div class="telegram-device">${telegramDeviceControl()}</div>
+    <p class="hint">Выбор сохраняется на этом устройстве и задаёт начальный флаг только новым задачам, в том числе из чата и импорта. На телефоне по умолчанию включён, на ПК выключен. В карточке задачи свой флаг.</p>
+    <ol class="telegram-steps">
+      <li><a href="/api/telegram/instructions" target="_blank">Инструкция по установке и входу</a>. На ПК с трекером: <code>python -m pip install playwright</code>, затем <code>python -m playwright install chromium</code>.</li>
+      <li>Войди в свой Telegram по QR ниже или на ПК командой <code>python tools/telegram_web.py login --show</code>. Для пароля 2FA используй окно на ПК.</li>
+      <li>Проверь сессию и отправь тест в своё «Избранное».</li>
+    </ol>
+    <p id="telegram-status"><b>${esc(names[t.auth] || "Нужна настройка")}</b>${t.error ? `<br>${esc(t.error)}` : ""}</p>
+    ${t.test_at ? `<p class="hint">Последний успешный тест в Избранное: ${fmtTime(t.test_at)}</p>` : ""}
+    <div class="telegram-actions">
+      <button ${t.busy ? "disabled" : ""} onclick="App.telegramAction('login')">${t.auth === "auth_required" ? "Войти заново" : "Войти по QR"}</button>
+      <button ${t.busy ? "disabled" : ""} onclick="App.telegramAction('check')">Проверить сессию</button>
+      <button ${t.busy || t.auth !== "ready" ? "disabled" : ""} onclick="App.telegramAction('test')">Тест в Избранное</button>
+      ${t.operation === "login" ? '<button onclick="App.telegramAction(\'cancel\')">Отменить вход</button>' : ""}
+    </div>
+    ${t.operation === "login" ? `<p class="hint">Telegram на телефоне → Настройки → Устройства → Подключить устройство. Если трекер открыт на том же телефоне, открой эту страницу на ПК, чтобы отсканировать QR.</p>
+      ${t.qr ? `<img class="telegram-qr" src="/api/telegram/qr?t=${Date.now()}" alt="QR для входа в Telegram">` : '<p class="muted">Ждём QR от Telegram Web…</p>'}` : ""}
+    <p class="hint">Профиль и материалы хранятся только на ПК с трекером в data/telegram/. Вкладку на телефоне можно закрыть; сервер трекера должен работать.</p>`;
+  clearTimeout(telegramPoll);
+  if (S.view === "settings" && t.busy) telegramPoll = setTimeout(refreshTelegram, 1500);
+}
+
+async function refreshTelegram() {
+  if (S.view !== "settings") return;
+  const ok = fresh("telegram");
+  const state = await api("GET", "/api/telegram");
+  if (!ok() || S.view !== "settings") return;
+  S.state.telegram = state;
+  renderTelegramSettings();
+}
+
+async function telegramAction(operation) {
+  S.state.telegram = await api("POST", `/api/telegram/${operation}`, {});
+  renderTelegramSettings();
+}
+
+function openTelegramSettings() {
+  if (S.chatOpen && matchMedia("(max-width: 900px)").matches) toggleChat();
+  setView("settings");
+  $("#telegram-settings")?.scrollIntoView({block: "start"});
+  refreshTelegram();
 }
 
 function gitReadinessPanel(p, mode) {
@@ -689,6 +805,7 @@ function importDialog() {
   modal(`<h3>Импорт задач текстом</h3>
     <p class="muted">Вставь текст из другого трекера, письма или заметок — одну задачу или сразу пачку. ${S.state.agent_name} разберёт его на карточки, ты проверишь перед созданием.</p>
     <textarea id="im-text" rows="12" placeholder="Вставь сюда…"></textarea>
+    ${telegramTaskChoice("im-telegram", telegramDefault())}
     <div id="im-result"></div>
     <div class="actions" id="im-actions"><button onclick="App.closeModal()">Отмена</button><button class="primary" id="im-go" onclick="App.importParse()">Разобрать</button></div>`, "wide");
   setTimeout(() => $("#im-text").focus(), 0);
@@ -706,7 +823,8 @@ async function importParse() {
   const cols = S.board.columns.filter(c => !["progress", "waiting", "done"].includes(c.kind));
   $("#im-result").innerHTML = `<label>Найдено задач: ${r.tasks.length}. Проверь и поправь:</label>` +
     r.tasks.map((t, i) => `<div class="import-item"><input type="checkbox" checked data-i="${i}">
-      <div><input class="im-title" value="${esc(t.title)}" style="font-weight:600;margin-bottom:6px"><textarea class="im-desc" rows="3">${esc(t.description)}</textarea></div></div>`).join("");
+      <div><input class="im-title" value="${esc(t.title)}" style="font-weight:600;margin-bottom:6px"><textarea class="im-desc" rows="3">${esc(t.description)}</textarea>
+      <label class="telegram-choice"><input class="im-notify" type="checkbox" ${t.telegram_notify || $("#im-telegram").checked ? "checked" : ""}> Результат в Telegram</label></div></div>`).join("");
   $("#im-actions").innerHTML = `<select id="im-col" style="width:auto">${cols.map(c => `<option value="${c.id}" ${c.kind === "backlog" ? "selected" : ""}>в «${esc(c.name)}»</option>`).join("")}</select>
     <button onclick="App.closeModal()">Отмена</button><button id="im-go" onclick="App.importParse()">Разобрать заново</button>
     <button class="primary" onclick="App.importCommit()">Создать задачи</button>`;
@@ -714,7 +832,7 @@ async function importParse() {
 
 async function importCommit() {
   const tasks = [...document.querySelectorAll(".import-item")].filter(el => el.querySelector("input[type=checkbox]").checked)
-    .map(el => ({ title: el.querySelector(".im-title").value, description: el.querySelector(".im-desc").value }));
+    .map(el => ({ title: el.querySelector(".im-title").value, description: el.querySelector(".im-desc").value, telegram_notify: el.querySelector(".im-notify").checked }));
   await api("POST", `/api/projects/${S.projectId}/import/commit`, { tasks, column_id: +$("#im-col").value });
   closeModal(); toast(`Создано задач: ${tasks.length}`); loadBoard();
 }
@@ -818,7 +936,7 @@ async function chatSend() {
     const attachments = await Promise.all(S.atts.map(async a => ({ name: a.name, type: a.file.type, data: await fileBase64(a.file) })));
     inp.value = "";
     if (!S.chat.id) await openChat((await api("POST", `/api/projects/${S.projectId}/chats`)).id);  // первое сообщение в проекте
-    await api("POST", `/api/chats/${S.chat.id}/messages`, { text, attachments });
+    await api("POST", `/api/chats/${S.chat.id}/messages`, { text, attachments, telegram_notify: telegramDefault() });
     clearAtts();
   } catch (e) {
     if (!inp.value) inp.value = text;
@@ -1018,6 +1136,7 @@ document.addEventListener("click", e => {
 });
 
 window.App = {
+  setTelegramDefault, openTelegramSettings, telegramAction, setTaskTelegram, retryTelegram,
   taskModelChanged, setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
   newTask, createTask, openTask, saveTask, comment, toTodo, stopTask, resetTask, deleteTask, closeModal,
   renderRefs, linkSearch, linkPick, unlinkTask,
@@ -1030,6 +1149,7 @@ window.App = {
 (async () => {
   await loadState();
   render();
+  if (new URLSearchParams(location.search).get("setup") === "telegram") openTelegramSettings();
   connect();  // подписываемся до загрузки доски и чата, чтобы не потерять события, пришедшие во время неё
   await loadBoard();
   if (S.chatOpen) loadChat();

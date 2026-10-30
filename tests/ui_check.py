@@ -24,6 +24,19 @@ def main():
             {"key": "auth", "status": "error" if missing else "ok", "message": "gh не найден в PATH" if missing else "Локальная проверка без push"}]}
 
     fixture.main.check_git_readiness = git_check
+    original_telegram_start = fixture.main.telegram.start
+
+    def telegram_start(operation):
+        fixture.main.telegram.auth("ready")
+        if operation == "test":
+            fixture.db.set_setting("telegram_test_at", fixture.db.now())
+
+    fixture.main.telegram.start = telegram_start
+    pid = fixture.db.create_project("Демо Telegram", "C:/Projects/Demo")
+    fixture.db.ex("DELETE FROM projects WHERE id<>?", (pid,))
+    demo = fixture.db.create_task(pid, "Результат с отдельной ошибкой доставки", telegram_notify=True)
+    fixture.pl.finish_task(demo, "Изменения готовы, проверки пройдены на заглушках.", "Демонстрационные данные.")
+    fixture.db.ex("UPDATE telegram_deliveries SET state='error', error='Войдите в Telegram заново, затем повторите доставку.' WHERE task_id=?", (demo,))
     fixture.db.set_setting("git_mode", "commit_push")
     fixture.cr.INFO["models"] = [{"model": "gpt-test", "displayName": "Codex Test", "isDefault": True, "supportedReasoningEfforts": [{"reasoningEffort": "high"}]},
                                 {"model": "gpt-other", "displayName": "Other", "supportedReasoningEfforts": [{"reasoningEffort": "low"}]}]
@@ -55,6 +68,7 @@ setInterval(() => {
  ws.addEventListener('message',e=>{const m=JSON.parse(e.data); const p=pending.get(m.id); if(p){pending.delete(m.id);m.error?p.reject(m.error):p.resolve(m.result)}});
  const call=(method,params={})=>new Promise((resolve,reject)=>{const rid=++id;pending.set(rid,{resolve,reject});ws.send(JSON.stringify({id:rid,method,params}))});
  await call('Emulation.setDeviceMetricsOverride',{width:+width,height:+height,deviceScaleFactor:1,mobile:+width<600});
+ await call('Network.setUserAgentOverride',{userAgent:+width<600?'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36'});
  await call('Page.navigate',{url:target});
  let state;
  for(let n=0;n<60;n++){
@@ -83,6 +97,42 @@ setInterval(() => {
  await evaluate('App.openGitSettings()');
  await waitFor('document.querySelector("#git-result").textContent.includes("Локальная проверка без push")');
  state.gitReopen=await evaluate('document.querySelector("#git-settings").getBoundingClientRect().top >= -2');
+ state.telegramInitial=await evaluate(`telegramDefault() === ${+width<600}`);
+ state.telegramChatControl=await evaluate('document.querySelector("#chat-telegram input").checked === telegramDefault()');
+ state.telegramNotReady=await evaluate('document.querySelector("#telegram-status").textContent.includes("Не подключён") && [...document.querySelectorAll("#telegram-settings button")].find(b=>b.textContent.includes("Тест в Избранное")).disabled');
+ await evaluate(`App.setTelegramDefault(${+width>=600})`);
+ await call('Page.reload');
+ await waitFor('document.querySelector("#telegram-status")');
+ state.telegramRemembered=await evaluate(`telegramDefault() === ${+width>=600}`);
+ await evaluate('App.telegramAction("check")');
+ await evaluate('App.telegramAction("test")');
+ state.telegramReady=await evaluate('document.querySelector("#telegram-status").textContent.includes("Авторизация проверена") && document.querySelector("#telegram-settings").textContent.includes("Последний успешный тест")');
+ await evaluate('App.setTelegramDefault(false); App.setView("board")');
+ await waitFor('S.board && document.querySelector(".board")');
+ await evaluate('App.newTask()');
+ state.telegramFormDefault=await evaluate('!document.querySelector("#nt-telegram").checked');
+ await evaluate('document.querySelector("#nt-title").value="Задача из интерфейса";document.querySelector("#nt-telegram").checked=true;App.createTask()');
+ const created=await evaluate('(async()=>{const b=await api("GET",`/api/projects/${S.projectId}/board`);return b.tasks.find(t=>t.title==="Задача из интерфейса").id})()');
+ state.telegramCreated=await evaluate(`(async()=>!!(await api('GET','/api/tasks/${created}')).telegram_notify)()`);
+ await evaluate(`App.openTask(${created})`);
+ await evaluate('App.setTelegramDefault(true); App.setTaskTelegram(false)');
+ state.telegramIndependent=await evaluate(`(async()=>telegramDefault() && !(await api('GET','/api/tasks/${created}')).telegram_notify)()`);
+ await evaluate('document.querySelector("#tt-desc").value="Скинь результат в ТГ";App.saveTask()');
+ state.telegramExplicit=await evaluate('document.querySelector("#tt-telegram").checked');
+ await evaluate('App.closeModal(); App.setTelegramDefault(false)');
+ const failed=await evaluate('(async()=>{const b=await api("GET",`/api/projects/${S.projectId}/board`);return b.tasks.find(t=>t.title==="Результат с отдельной ошибкой доставки").id})()');
+ await evaluate(`App.openTask(${failed})`);
+ state.telegramDeliveryError=await evaluate('S.task.status==="done" && document.querySelector("#tt-dyn").textContent.includes("ошибка доставки") && document.querySelector("#tt-dyn").textContent.includes("Повторить доставку")');
+ await evaluate('document.querySelectorAll(".toast").forEach(e=>e.remove())');
+ const taskShot=await call('Page.captureScreenshot',{format:'png'});
+ fs.writeFileSync(screenshot.replace('.png','-task.png'),Buffer.from(taskShot.data,'base64'));
+ await evaluate('App.retryTelegram()');
+ state.telegramRetried=await evaluate('S.task.telegram_delivery.state==="pending" && S.task.status==="done"');
+ await evaluate('App.closeModal(); App.openTelegramSettings()');
+ await evaluate('App.toggleChat(); App.openTelegramSettings()');
+ state.telegramChatSetup=await evaluate(`S.view === "settings" && S.chatOpen === ${+width>=900}`);
+ await evaluate('if(S.chatOpen)App.toggleChat()');
+ state.telegramOverflow=await evaluate('document.documentElement.scrollWidth>innerWidth');
  state.overflow=await evaluate('document.documentElement.scrollWidth>innerWidth');
  const shot=await call('Page.captureScreenshot',{format:'png'});
  fs.writeFileSync(screenshot,Buffer.from(shot.data,'base64'));
@@ -91,6 +141,10 @@ setInterval(() => {
 ''', encoding="utf-8")
     try:
         for width, height in ((1280, 900), (390, 844)):
+            fixture.db.set_setting("telegram_auth", "unconfigured")
+            fixture.db.set_setting("telegram_test_at", "0")
+            fixture.db.ex("DELETE FROM tasks WHERE title='Задача из интерфейса'")
+            fixture.db.ex("UPDATE telegram_deliveries SET state='error' WHERE task_id=?", (demo,))
             screenshot = root / f"ui-{width}.png"
             profile = root / f"edge-{width}"
             cmd = [str(edge), "--headless", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
@@ -103,7 +157,7 @@ setInterval(() => {
                     time.sleep(0.1)
                 port = devtools.read_text().splitlines()[0]
                 out = subprocess.run(["node", str(probe_js), port, str(width), str(height), f"http://127.0.0.1:{srv.server_port}", str(screenshot)],
-                                     capture_output=True, timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                                     capture_output=True, timeout=60, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 assert out.returncode == 0, out.stderr.decode("utf-8", "replace")
                 state = json.loads(out.stdout)
             finally:
@@ -115,10 +169,14 @@ setInterval(() => {
             assert state["width"] == width, state
             assert state["efforts"]["first"][-1][0] == "high" and state["efforts"]["other"][-1][0] == "low", state
             assert all(state[k] for k in ("gitAuto", "gitOff", "gitCommit", "gitMissingGh", "gitReopen")), state
+            assert all(state[k] for k in ("telegramInitial", "telegramNotReady", "telegramRemembered", "telegramReady", "telegramFormDefault",
+                                         "telegramCreated", "telegramIndependent", "telegramExplicit", "telegramDeliveryError", "telegramRetried", "telegramChatControl", "telegramChatSetup")), state
+            assert not state["telegramOverflow"], state
         assert ("commit", "existing") in git_calls and ("commit_push", "gh") in git_calls, git_calls
         assert not any(mode == "off" for mode, auth in git_calls), git_calls
     finally:
         fixture.main.check_git_readiness = original_git_check
+        fixture.main.telegram.start = original_telegram_start
         srv.shutdown()
         srv.server_close()
 

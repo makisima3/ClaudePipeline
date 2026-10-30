@@ -22,6 +22,7 @@ def S(props, required=()):
 STR = {"type": "string"}
 INT = {"type": "integer"}
 IDS = {"type": "array", "items": INT}
+BOOL = {"type": "boolean"}
 
 APPROVE = {
     "name": "approve",
@@ -33,7 +34,8 @@ CREATE_TASK = {
     "description": "Создать задачу в трекере. column: 'backlog' (по умолчанию), 'todo' (сразу в работу) или имя колонки. "
                    "project_id — если не текущий проект. links — id задач, нужных для контекста: связь видна в обеих "
                    "карточках, а агент получит их итоги и пути к отчётам.",
-    "inputSchema": S({"title": STR, "description": STR, "column": STR, "project_id": INT, "links": IDS}, ["title"]),
+    "inputSchema": S({"title": STR, "description": STR, "column": STR, "project_id": INT, "links": IDS,
+                      "telegram_notify": {"type": "boolean", "description": "Отправить результат в Избранное: настройка устройства или явная просьба."}}, ["title"]),
 }
 GET_TASK = {
     "name": "get_task",
@@ -65,8 +67,11 @@ TASK_TOOLS = [
     {
         "name": "finish_task",
         "description": "Завершить задачу. summary — 1-3 предложения для карточки. report — подробный отчёт в markdown: "
-                       "что сделано и как, изменённые файлы, как проверить, принятые решения, открытые вопросы.",
-        "inputSchema": S({"summary": STR, "report": STR}, ["summary", "report"]),
+                       "что сделано и как, изменённые файлы, как проверить, принятые решения, открытые вопросы. "
+                       "Для Telegram подготовь telegram_text и telegram_files: краткий итог и пути к материалам, "
+                       "для визуальных изменений — скриншоты. Файлы копируются до выхода агента, доставляет сервер.",
+        "inputSchema": S({"summary": STR, "report": STR, "telegram_text": STR,
+                          "telegram_files": {"type": "array", "items": STR}, "telegram_notify": BOOL}, ["summary", "report"]),
     },
     CREATE_TASK,
     GET_TASK,
@@ -85,8 +90,9 @@ CHAT_TOOLS = [
     CREATE_TASK,
     {
         "name": "update_task",
-        "description": "Изменить заголовок/описание задачи. links — связать с задачами (id), unlink — убрать связи.",
-        "inputSchema": S({"task_id": INT, "title": STR, "description": STR, "links": IDS, "unlink": IDS}, ["task_id"]),
+        "description": "Изменить заголовок/описание задачи, telegram_notify — отправку результата в Избранное. links — связать с задачами (id), unlink — убрать связи.",
+        "inputSchema": S({"task_id": INT, "title": STR, "description": STR, "links": IDS, "unlink": IDS,
+                          "telegram_notify": BOOL}, ["task_id"]),
     },
     {
         "name": "move_task",

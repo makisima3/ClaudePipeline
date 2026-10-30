@@ -24,6 +24,7 @@ import pipeline as pl
 from runner import PORT, NO_WINDOW
 from updater import updater
 from git_readiness import check as check_git_readiness
+from telegram import telegram, delivery as telegram_delivery, ROOT as TELEGRAM_ROOT
 
 WEB = db.ROOT / "web"
 ROUTES = []
@@ -61,6 +62,7 @@ def api_state(h, body, query):
         "settings": db.get_settings(),
         "pipeline": pl.orch.state(),
         "update": updater.state(),
+        "telegram": telegram.state(),
         "projects": db.q("SELECT * FROM projects ORDER BY id"),
         "open_questions": db.one("SELECT COUNT(*) AS n FROM questions WHERE status='open'")["n"],
     }
@@ -98,7 +100,7 @@ def api_update(h, body, query):
 @route("POST", "/api/settings")
 def api_settings(h, body, query):
     for k, v in body.items():
-        if k in db.DEFAULT_SETTINGS and k not in ("pipeline_enabled", "pause_until"):
+        if k in db.DEFAULT_SETTINGS and k not in ("pipeline_enabled", "pause_until", "telegram_auth", "telegram_error", "telegram_test_at"):
             db.set_setting(k, v)
     if body.get("clear_pause"):
         db.set_setting("pause_until", "0")
@@ -203,7 +205,9 @@ def api_task_create(h, body, query, pid):
     title = (body.get("title") or "").strip()
     need(title, "Нужен заголовок", 400)
     cid = int(body.get("column_id") or db.column_by_kind(pid, "backlog")["id"])
-    tid = db.create_task(pid, title, body.get("description", ""), cid, body.get("model"), body.get("effort"))
+    notify = body.get("telegram_notify", False)
+    need(isinstance(notify, bool), "telegram_notify должен быть логическим значением", 400)
+    tid = db.create_task(pid, title, body.get("description", ""), cid, body.get("model"), body.get("effort"), notify)
     kind = db.one("SELECT kind FROM columns WHERE id=?", (cid,))["kind"]
     if kind == "todo":
         db.update_task(tid, status="queued")
@@ -218,6 +222,7 @@ def api_task(h, body, query, tid):
     t["events"] = db.task_events(tid)
     t["questions"] = [db.get_question(r["id"]) for r in db.q("SELECT id FROM questions WHERE task_id=? ORDER BY id", (tid,))]
     t["running"] = tid in pl.orch.runs
+    t["telegram_delivery"] = telegram_delivery(tid)
     transcript = pl.transcript_path(t["project_path"], t["session_id"])
     t["transcript"] = str(transcript) if transcript else None
     t["links"] = [{k: l[k] for k in ("id", "title", "status", "column_name", "column_kind", "project_id", "project_name")}
@@ -268,8 +273,13 @@ def api_task_update(h, body, query, tid):
     t = db.get_task(tid)
     need(t)
     fields = {k: (body[k] or None) if k in ("model", "effort") else body[k]
-              for k in ("title", "description", "model", "effort") if k in body}
+              for k in ("title", "description", "model", "effort", "telegram_notify") if k in body}
+    if "telegram_notify" in fields:
+        need(isinstance(fields["telegram_notify"], bool), "telegram_notify должен быть логическим значением", 400)
     db.update_task(tid, **fields)
+    updated = db.get_task(tid)
+    if updated["telegram_notify"] and updated["status"] == "done" and updated["summary"] and not telegram_delivery(tid):
+        pl.prepare_telegram(updated, updated["summary"])
     pl.changed(t["project_id"])
     return db.get_task(tid)
 
@@ -465,7 +475,9 @@ def api_chat_send(h, body, query, cid):
     need(not pl.chat.running(cid), "Я ещё отвечаю на прошлое сообщение в этом чате", 409)
     need(not pl.restart.since, "Трекер перезапускается — отправь сообщение через минуту", 409)
     attachments = save_uploads(db.chat_dir(c["project_id"], cid), items) if items else None
-    need(pl.chat.send(cid, text, attachments), "Я ещё отвечаю на прошлое сообщение в этом чате", 409)
+    notify = body.get("telegram_notify", False)
+    need(isinstance(notify, bool), "telegram_notify должен быть логическим значением", 400)
+    need(pl.chat.send(cid, text, attachments, notify), "Я ещё отвечаю на прошлое сообщение в этом чате", 409)
     return {"ok": True}
 
 
@@ -517,11 +529,58 @@ def api_import_commit(h, body, query, pid):
     kind = db.one("SELECT kind FROM columns WHERE id=?", (cid,))["kind"]
     for t in body.get("tasks") or []:
         if (t.get("title") or "").strip():
-            tid = db.create_task(pid, t["title"].strip(), t.get("description", ""), cid)
+            notify = t.get("telegram_notify", body.get("telegram_notify", False))
+            need(isinstance(notify, bool), "telegram_notify должен быть логическим значением", 400)
+            tid = db.create_task(pid, t["title"].strip(), t.get("description", ""), cid, telegram_notify=notify)
             if kind == "todo":
                 db.update_task(tid, status="queued")
     pl.changed(pid)
     return {"ok": True}
+
+
+# ---------------- Telegram (опциональные компоненты запускаются только по запросу) ----------------
+@route("GET", "/api/telegram")
+def api_telegram(h, body, query):
+    return telegram.state()
+
+
+@route("GET", "/api/telegram/instructions")
+def api_telegram_instructions(h, body, query):
+    return h.send_bytes((db.ROOT / "docs/telegram-results.md").read_bytes(), "text/plain; charset=utf-8")
+
+
+@route("POST", "/api/telegram/(?:check|login|test)")
+def api_telegram_action(h, body, query):
+    operation = urlparse(h.path).path.rsplit("/", 1)[-1]
+    try:
+        telegram.start(operation)
+    except ValueError as e:
+        raise HttpError(409, str(e))
+    return telegram.state()
+
+
+@route("POST", "/api/telegram/cancel")
+def api_telegram_cancel(h, body, query):
+    need(telegram.operation == "login", "Сейчас нет входа в Telegram", 409)
+    telegram.kill()
+    return {"ok": True}
+
+
+@route("GET", "/api/telegram/qr")
+def api_telegram_qr(h, body, query):
+    path = TELEGRAM_ROOT / "qr.png"
+    need(telegram.operation == "login" and path.is_file(), "QR-код ещё не готов")
+    return h.send_bytes(path.read_bytes(), "image/png")
+
+
+@route("POST", r"/api/tasks/(\d+)/telegram/retry")
+def api_telegram_retry(h, body, query, tid):
+    need(db.get_task(tid))
+    try:
+        telegram.retry(tid, body.get("resolution"))
+    except ValueError as e:
+        raise HttpError(409, str(e))
+    return telegram_delivery(tid)
 
 
 # ---------------- служебное ----------------
@@ -723,9 +782,14 @@ def main():
         raise
     pl.preflight()
     pl.orch.recover()
+    telegram.change = pl.changed
+    telegram.stopping = lambda: bool(pl.restart.since)
+    telegram.running_tasks = lambda: set(pl.orch.runs)
+    telegram.recover()
     threading.Thread(target=pl.orch.loop, daemon=True).start()
     threading.Thread(target=updater.loop, daemon=True).start()
     threading.Thread(target=pl.titler.loop, daemon=True).start()
+    threading.Thread(target=telegram.loop, daemon=True).start()
     url = f"http://127.0.0.1:{PORT}"
     if after:
         pl.log_restart(f"новый экземпляр запущен (pid {os.getpid()}) после pid {after}")

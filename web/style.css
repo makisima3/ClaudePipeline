@@ -266,6 +266,14 @@ a.tref:hover { text-decoration: underline; }
 .git-readiness .git-error > b { color: var(--err); }
 .git-readiness .git-warning > b { color: var(--warn); }
 #git-settings { scroll-margin-top: 12px; }
+.telegram-choice { display: flex; align-items: center; gap: 8px; margin: 10px 0; color: var(--text); font-size: 13px; cursor: pointer; }
+.telegram-choice input { width: auto; flex: none; }
+.telegram-device { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.telegram-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.telegram-steps { padding-left: 22px; font-size: 13px; overflow-wrap: anywhere; }
+.telegram-steps li { margin: 8px 0; }
+.telegram-qr { display: block; max-width: 100%; width: 260px; background: white; padding: 12px; border-radius: 8px; }
+#telegram-settings { scroll-margin-top: 12px; overflow-wrap: anywhere; }
 
 @media (max-width: 900px) {
   .chat { position: fixed; inset: 0; width: auto; z-index: 5; }

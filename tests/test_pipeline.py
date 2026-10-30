@@ -20,6 +20,9 @@ SOURCE = Path(__file__).resolve().parents[1]
 SANDBOX = Path(tempfile.mkdtemp(prefix="pipeline-tests-"))
 shutil.copytree(SOURCE / "server", SANDBOX / "server")
 shutil.copytree(SOURCE / "web", SANDBOX / "web")
+shutil.copytree(SOURCE / "tools", SANDBOX / "tools", ignore=shutil.ignore_patterns("__pycache__"))
+(SANDBOX / "docs").mkdir()
+shutil.copy2(SOURCE / "docs/telegram-results.md", SANDBOX / "docs/telegram-results.md")
 (SANDBOX / "data").mkdir()
 # Старая схема без новых колонок: проверяем именно миграцию.
 tree = ast.parse((SOURCE / "server/db.py").read_text(encoding="utf-8"))
