@@ -64,6 +64,7 @@ async function loadState() {
   if (!ok()) return;
   if (bootChanged(st.boot_id)) return;
   S.state = st;
+  document.documentElement.dataset.agent = st.agent === "codex" ? "codex" : "claude";
   if (st.agent_info?.models?.length) {
     MODELS = [["", "по умолчанию"], ...st.agent_info.models.filter(m => !m.hidden).map(m => [m.model || m.id, m.displayName || m.model || m.id])];
   }

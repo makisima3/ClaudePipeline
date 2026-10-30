@@ -255,7 +255,7 @@ git remote set-url origin https://github.com/makisima3/AgentPipeline.git
 - `server/mcp_tracker.py` — MCP-сервер, через который агенты и чат общаются с трекером.
 - `server/updater.py` — проверка обновлений на GitHub и обновление через `git pull --ff-only`.
 - `server/db.py` — SQLite: схема, миграции, настройки по умолчанию.
-- `web/` — интерфейс на чистом HTML, CSS и JS без сборки: `index.html` и `app.js` (всё приложение), `md.js` (рендер markdown), `report.html` (страница отчёта), `style.css`.
+- `web/` — интерфейс на чистом HTML, CSS и JS без сборки: `index.html` и `app.js` (всё приложение), `md.js` (рендер markdown), `report.html` (страница отчёта), `style.css`. Палитра автоматически выбирается по исполнителю сервера (`agent` из `/api/state`, атрибут `data-agent` на `html`): для Codex — тёмные графитовые фоны, светлые кнопки и зелёные акценты в духе ChatGPT; для Claude — прежняя палитра. Тема общая для доски, чата, настроек, диалогов и отчётов и не зависит от модели задачи.
 - `docs/screenshots/` — скриншоты для этого README, сняты на демо-данных.
 - `CLAUDE.md`, `AGENTS.md` — проектные инструкции для Claude Code и Codex.
 - `CONTRIBUTING.md`, `.github/` — как участвовать, шаблоны Issues и Pull Request.

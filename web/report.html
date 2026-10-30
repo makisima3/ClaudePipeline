@@ -18,6 +18,9 @@
 </div>
 <script src="/md.js"></script>
 <script>
+  fetch('/api/state').then(r => r.json()).then(st => {
+    document.documentElement.dataset.agent = st.agent === 'codex' ? 'codex' : 'claude';
+  }).catch(() => {});
   const id = location.pathname.split("/").pop();
   fetch(`/api/tasks/${id}/report`).then(r => r.json()).then(d => {
     if (d.error) { document.getElementById("r").textContent = d.error; return; }

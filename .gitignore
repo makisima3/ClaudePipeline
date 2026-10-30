@@ -18,3 +18,7 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# локальные визуальные проверки
+output/playwright/
+.playwright-cli/

@@ -7,6 +7,12 @@
   --muted: #6f6c64;
   --accent: #c8642c;
   --accent-soft: #f6e3d6;
+  --primary: var(--accent);
+  --primary-text: #fff;
+  --accent-text: #fff;
+  --focus: var(--accent-soft);
+  --user-bg: var(--accent-soft);
+  --overlay: rgba(0,0,0,.35);
   --ok: #2f8a57;
   --ok-soft: #dcf0e3;
   --warn: #b07a12;
@@ -35,20 +41,39 @@
   --shadow: 0 1px 2px rgba(0,0,0,.4); color-scheme: dark;
 }
 
+/* Палитра исполнителя важнее системной темы; оформление Claude остаётся прежним. */
+:root[data-agent="codex"] {
+  --bg: #212121; --panel: #2b2b2b; --col: #181818; --line: #494949;
+  --text: #ececec; --muted: #b4b4b4;
+  --accent: #74d7b7; --accent-soft: #203b34; --accent-text: #10251e;
+  --primary: #ececec; --primary-text: #171717; --focus: #74d7b7;
+  --user-bg: #383838; --overlay: rgba(0,0,0,.65);
+  --ok: #7bdba4; --ok-soft: #20392b; --warn: #f0c36a; --warn-soft: #40331e;
+  --err: #ff938a; --err-soft: #452825; --run: #9bbcff; --run-soft: #28354b;
+  --shadow: 0 1px 3px rgba(0,0,0,.35); color-scheme: dark;
+}
+:root[data-agent="codex"] ::selection { background: var(--accent); color: var(--accent-text); }
+:root[data-agent="codex"] :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+:root[data-agent="codex"] input::placeholder,
+:root[data-agent="codex"] textarea::placeholder { color: var(--muted); opacity: 1; }
+:root[data-agent="codex"] input { accent-color: var(--accent); }
+:root[data-agent="codex"] button.primary:hover:not(:disabled) { background: #d4d4d4; border-color: #d4d4d4; }
+:root[data-agent="codex"] button:disabled { opacity: .55; }
+
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; display: flex; flex-direction: column; }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 12px; }
 button:hover { border-color: var(--muted); }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-text); }
 button.danger { color: var(--err); }
 button.ghost { border-color: transparent; background: transparent; }
 button.ghost:hover { background: var(--col); }
 button:disabled { opacity: .5; cursor: default; }
 input, select, textarea { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; width: 100%; }
 textarea { resize: vertical; min-height: 80px; }
-input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--focus); border-color: var(--accent); }
 label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
 a { color: var(--accent); }
 .muted { color: var(--muted); }
@@ -59,7 +84,7 @@ a { color: var(--accent); }
 /* ---------- header ---------- */
 header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .logo { font-weight: 700; letter-spacing: -.02em; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-.logo .mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); color: #fff; display: grid; place-items: center; font-size: 13px; }
+.logo .mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); color: var(--accent-text); display: grid; place-items: center; font-size: 13px; }
 .projects { display: flex; gap: 4px; overflow-x: auto; flex: 1; min-width: 120px; }
 .proj { display: flex; align-items: center; gap: 6px; white-space: nowrap; border-color: transparent; background: transparent; }
 .proj.active { background: var(--col); border-color: var(--line); font-weight: 600; }
@@ -67,7 +92,7 @@ header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; back
 .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .nav { display: flex; gap: 4px; }
 .nav button.active { background: var(--col); }
-.badge { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 700; text-align: center; line-height: 18px; }
+.badge { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: var(--accent-text); font-size: 11px; font-weight: 700; text-align: center; line-height: 18px; }
 
 .switch { display: flex; align-items: center; gap: 10px; padding: 4px 6px 4px 12px; border: 1px solid var(--line); border-radius: 22px; }
 .switch .state { font-size: 12px; color: var(--muted); white-space: nowrap; }
@@ -139,7 +164,7 @@ header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; back
 .chat-item button:hover { opacity: 1; }
 .msgs { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 .msg { max-width: 92%; padding: 8px 11px; border-radius: 10px; overflow-wrap: anywhere; }
-.msg.user { align-self: flex-end; background: var(--accent-soft); white-space: pre-wrap; }
+.msg.user { align-self: flex-end; background: var(--user-bg); white-space: pre-wrap; }
 .msg.assistant { align-self: flex-start; background: var(--col); }
 .msg.tool { align-self: flex-start; font-family: var(--mono); font-size: 11px; color: var(--muted); padding: 0 4px; }
 .msg.error { align-self: stretch; background: var(--err-soft); color: var(--err); font-size: 12px; white-space: pre-wrap; }
@@ -172,7 +197,7 @@ header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; back
 .qhead a { cursor: pointer; }
 
 /* ---------- modal ---------- */
-.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; z-index: 10; }
+.overlay { position: fixed; inset: 0; background: var(--overlay); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; z-index: 10; }
 .modal { background: var(--panel); border-radius: 14px; width: 100%; max-width: 760px; padding: 20px 22px; box-shadow: 0 10px 40px rgba(0,0,0,.25); }
 .modal.wide { max-width: 980px; }
 .modal h3 { margin: 0 0 4px; }
