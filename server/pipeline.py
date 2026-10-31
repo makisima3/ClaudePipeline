@@ -13,6 +13,7 @@ from pathlib import Path
 
 import db
 import results
+import discussions
 from runner import CLAUDE, NO_WINDOW, ClaudeRun, short_tool
 from runtime import AGENT, NAME
 from telegram import telegram, prepare as prepare_telegram, delivery as telegram_delivery
@@ -139,6 +140,7 @@ CHAT_SYSTEM = """Ты — ассистент, встроенный в личны
 - Задачи из колонки «В работу» выполняют отдельные агенты пайплайна, у каждой своя сессия. Сам задачи по коду не выполняй, если пользователь прямо об этом не попросил, — оформляй их задачами.
 - Код проекта читать можно, чтобы точнее формулировать задачи.
 - Хорошая задача: короткий заголовок + описание с контекстом и критериями готовности.
+- Структурированное прикрепление результата в сообщении задаёт точные task_id/result_id/run_key. Обсуждай именно этот снимок. Создавай продолжение только по просьбе пользователя, добавляя исходный глобальный task_id в links; выполненную исходную задачу не изменяй. Настройку Telegram бери из текущего сообщения, не из исходной карточки.
 - В create_task всегда передавай telegram_notify из настройки устройства в текущем сообщении. Явная просьба прислать результат в Telegram включает telegram_notify=true для конкретной задачи, даже при выключенной настройке; при редактировании передавай её в update_task. Общая настройка относится только к новым задачам, старые массово не меняй.
 - Если пользователь вставил текст из другого трекера — разбери его на задачи и создай их.
 - Отвечай кратко, по-русски."""
@@ -559,6 +561,7 @@ class Chat:
 
     def __init__(self):
         self.runs = {}  # chat_id -> ClaudeRun
+        self.lock = threading.RLock()
 
     def running(self, cid):
         return cid in self.runs
@@ -590,7 +593,7 @@ class Chat:
         titler.request(cid)
         return True
 
-    def send(self, cid, text, attachments=None, telegram_notify=False):
+    def send(self, cid, text, attachments=None, telegram_notify=False, task_context=None, client_request_id=None):
         """attachments — уже сохранённые файлы: [{name, file, size, type}] в db.chat_dir(pid, cid)."""
         if cid in self.runs or restart.since:
             return False
@@ -600,7 +603,7 @@ class Chat:
         cwd = p["path"] if Path(p["path"]).is_dir() else str(db.ROOT)
         if not c["title"]:
             db.ex("UPDATE chats SET title=? WHERE id=?", (chat_title(text, attachments), cid))
-        self._msg(cid, pid, "user", text, attachments)
+        self._msg(cid, pid, "user", text, attachments, task_context, client_request_id)
         hub.send("chats", project_id=pid, chat_id=cid)
         folder = db.chat_dir(pid, cid)
         prompt = text
@@ -617,8 +620,10 @@ class Chat:
             history = []
             for m in db.chat_messages(cid):
                 files = "\n".join(str(folder / a["file"]) for a in m["attachments"])
-                history.append(m["role"] + ": " + (m["text"] or "") + ("\nФайлы: " + files if files else ""))
+                history.append(m["role"] + ": " + (m["text"] or "") + ("\nФайлы: " + files if files else "")
+                               + discussions.prompt(m.get("task_context")))
             prompt = "Контекст чата с другим исполнителем:\n" + "\n\n".join(history) + "\n\nТекущее сообщение:\n" + prompt
+        prompt += discussions.prompt(task_context or discussions.latest(cid))
         prompt += ("\n\nНастройка устройства для НОВЫХ задач из этого сообщения: telegram_notify="
                    + ("true" if telegram_notify else "false")
                    + ". Передавай её в create_task; явная просьба о Telegram важнее. Флаги старых задач не меняй без просьбы.")
@@ -629,7 +634,8 @@ class Chat:
             key=f"chat-{pid}-{cid}", cwd=cwd, prompt=prompt, session_id=sid, resume=resume, role="chat",
             system_prompt=CHAT_SYSTEM.format(name=p["name"], id=pid, path=p["path"]) + ("\n" + CODEX_SYSTEM if AGENT == "codex" else ""), project_id=pid,
             model=s["chat_model"] or s["model"] or None, permission_mode=s["permission_mode"],
-            log_path=db.DATA / "runs" / f"chat-{pid}-{cid}.jsonl", add_dirs=[str(folder)] if attachments else None,
+            log_path=db.DATA / "runs" / f"chat-{pid}-{cid}.jsonl",
+            add_dirs=([str(folder)] if attachments else []) + ([str(results.ROOT)] if discussions.latest(cid) else []),
             on_text=lambda t: self._msg(cid, pid, "assistant", t),
             on_tool=lambda n, i: None if n in QUIET_TOOLS else self._msg(cid, pid, "tool", short_tool(n.replace("mcp__tracker__", "трекер."), i)),
             on_done=lambda r: self._done(cid, pid, r),
@@ -646,11 +652,12 @@ class Chat:
             hub.send("chat_state", project_id=pid, chat_id=cid, running=False)
         return True
 
-    def _msg(self, cid, pid, role, text, attachments=None):
-        mid = db.add_chat(cid, role, text, attachments)
+    def _msg(self, cid, pid, role, text, attachments=None, task_context=None, client_request_id=None):
+        mid = db.add_chat(cid, role, text, attachments, task_context, client_request_id)
         if mid:  # None — чат удалили, пока шёл ответ
             hub.send("chat", project_id=pid, chat_id=cid, message={"id": mid, "role": role, "text": text,
-                                                                   "ts": time.time(), "attachments": attachments or []})
+                                                                   "ts": time.time(), "attachments": attachments or [],
+                                                                   "task_context": task_context, "client_request_id": client_request_id})
 
     def _done(self, cid, pid, r):
         self.runs.pop(cid, None)

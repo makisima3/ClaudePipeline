@@ -142,6 +142,13 @@ with _lock:
         _conn.execute("ALTER TABLE chats ADD COLUMN title_kind TEXT")
         _conn.execute("UPDATE chats SET title_kind='legacy' WHERE title IS NOT NULL")  # разберёт pipeline.Titler
     _conn.execute("CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id, id)")
+    for field in ("task_context", "client_request_id"):
+        if field not in {r["name"] for r in _conn.execute("PRAGMA table_info(chat_messages)")}:
+            _conn.execute(f"ALTER TABLE chat_messages ADD COLUMN {field} TEXT")
+    _conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS chat_message_request ON chat_messages(chat_id, client_request_id) WHERE client_request_id IS NOT NULL")
+    for field in ("description", "status"):
+        if field not in {r["name"] for r in _conn.execute("PRAGMA table_info(task_results)")}:
+            _conn.execute(f"ALTER TABLE task_results ADD COLUMN {field} TEXT")
 
 
 def _migrate_chats():
@@ -445,7 +452,7 @@ def create_chat(project_id, title=None):
     return ex("INSERT INTO chats(project_id, title, created_at, updated_at) VALUES(?,?,?,?)", (project_id, title, t, t))
 
 
-def add_chat(chat_id, role, text, attachments=None):
+def add_chat(chat_id, role, text, attachments=None, task_context=None, client_request_id=None):
     """attachments: [{name, file, size, type}], file — имя в data/uploads/<project_id>/<chat_id>/.
     None — чата уже нет (удалили, пока шёл ответ)."""
     with _lock:
@@ -454,13 +461,15 @@ def add_chat(chat_id, role, text, attachments=None):
             return None
         t = now()
         ex("UPDATE chats SET updated_at=? WHERE id=?", (t, chat_id))
-        return ex("INSERT INTO chat_messages(project_id, chat_id, role, text, ts, attachments) VALUES(?,?,?,?,?,?)",
+        return ex("INSERT INTO chat_messages(project_id, chat_id, role, text, ts, attachments, task_context, client_request_id) VALUES(?,?,?,?,?,?,?,?)",
                   (c["project_id"], chat_id, role, text, t,
-                   json.dumps(attachments, ensure_ascii=False) if attachments else None))
+                   json.dumps(attachments, ensure_ascii=False) if attachments else None,
+                   json.dumps(task_context, ensure_ascii=False) if task_context else None, client_request_id))
 
 
 def chat_messages(chat_id, limit=300):
     rows = q("SELECT * FROM chat_messages WHERE chat_id=? ORDER BY id DESC LIMIT ?", (chat_id, limit))[::-1]
     for r in rows:
         r["attachments"] = json.loads(r["attachments"]) if r["attachments"] else []
+        r["task_context"] = json.loads(r["task_context"]) if r["task_context"] else None
     return rows

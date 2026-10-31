@@ -53,7 +53,8 @@ function resultHtml(r, detail = false) {
     ${r.error ? `<p class="err-text" role="status">${esc(r.error)}</p>` : ''}
     <div class="result-files">${resultFiles(r)}</div>
     <div class="result-actions">${r.task_id ? `<button onclick="App.openTask(${r.task_id})">Карточка задачи</button>` : '<span class="muted">Карточка удалена, результат сохранён</span>'}
-      <button class="ghost" onclick="App.openResult(${r.id})">Отчёт и материалы</button></div></article>`;
+      <button class="ghost" onclick="App.openResult(${r.id})">Отчёт и материалы</button>
+      <button class="primary discuss-result" onclick="App.discussResult(${r.id})">Обсудить</button></div></article>`;
 }
 
 function renderResults() {

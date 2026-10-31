@@ -55,7 +55,8 @@ def prepare(t, summary, report, text=None, files=None):
     return {"project_id": t["project_id"], "task_id": t["id"], "source_task_id": t["id"],
             "task_number": t["task_number"], "project_name": t["project_name"], "title": t["title"],
             "run_key": run_key(t), "summary": summary, "text": (text or summary).strip(), "report": report,
-            "files": json.dumps(materials, ensure_ascii=False), "error": error, "created_at": db.now()}
+            "files": json.dumps(materials, ensure_ascii=False), "error": error, "created_at": db.now(),
+            "description": t.get("description", ""), "status": "done"}
 
 
 def save(row):
@@ -69,7 +70,7 @@ def save(row):
 
 
 def public(row, detail=False):
-    out = {k: row[k] for k in ("id", "project_id", "task_id", "task_number", "project_name", "title",
+    out = {k: row[k] for k in ("id", "project_id", "task_id", "source_task_id", "run_key", "task_number", "project_name", "title",
                                "summary", "text", "error", "created_at")}
     out["files"] = [{k: v for k, v in f.items() if k != "path"} |
                     {"url": f"/api/results/{row['id']}/files/{i}"} for i, f in enumerate(json.loads(row["files"]))]

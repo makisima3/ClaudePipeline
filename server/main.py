@@ -22,6 +22,7 @@ if __name__ == "__main__":
 import db
 import pipeline as pl
 import results
+import discussions
 from runner import PORT, NO_WINDOW
 from updater import updater
 from git_readiness import check as check_git_readiness
@@ -518,16 +519,36 @@ def save_uploads(folder, items):
 
 @route("POST", r"/api/chats/(\d+)/messages")
 def api_chat_send(h, body, query, cid):
+    # Один запрос сохраняет вложения/сообщение и запускает ответ. Повтор после обрыва — только квитанция.
+    with pl.chat.lock:
+        return chat_send(body, cid)
+
+
+def chat_send(body, cid):
     c = get_chat(cid)
+    request_id = body.get("client_request_id")
+    need(request_id is None or isinstance(request_id, str) and re.fullmatch(r"[a-zA-Z0-9-]{16,80}", request_id),
+         "Неверный идентификатор отправки", 400)
+    if request_id:
+        saved = db.one("SELECT id FROM chat_messages WHERE chat_id=? AND client_request_id=?", (cid, request_id))
+        if saved:
+            return {"ok": True, "duplicate": True, "message_id": saved["id"]}
+    need(not body.get("receipt_only"), "Отправка не найдена. Прикрепите файлы заново или продолжите без них.", 409)
     text = (body.get("text") or "").strip()
     items = body.get("attachments") or []
     need(text or items, "Пустое сообщение", 400)
     need(not pl.chat.running(cid), "Я ещё отвечаю на прошлое сообщение в этом чате", 409)
     need(not pl.restart.since, "Трекер перезапускается — отправь сообщение через минуту", 409)
-    attachments = save_uploads(db.chat_dir(c["project_id"], cid), items) if items else None
     notify = body.get("telegram_notify", False)
     need(isinstance(notify, bool), "telegram_notify должен быть логическим значением", 400)
-    need(pl.chat.send(cid, text, attachments, notify), "Я ещё отвечаю на прошлое сообщение в этом чате", 409)
+    context = None
+    if body.get("task_context") is not None:
+        try:
+            context = discussions.capture(c["project_id"], body["task_context"])
+        except ValueError as e:
+            raise HttpError(400, str(e))
+    attachments = save_uploads(db.chat_dir(c["project_id"], cid), items) if items else None
+    need(pl.chat.send(cid, text, attachments, notify, context, request_id), "Я ещё отвечаю на прошлое сообщение в этом чате", 409)
     return {"ok": True}
 
 

@@ -39,6 +39,8 @@
     <div class="typing hidden" id="typing"><span class="spinner"></span> думаю…</div>
     <div class="chat-input">
       <div class="telegram-device" id="chat-telegram"></div>
+      <div id="chatContext" class="hidden"></div>
+      <div id="draftNotice" class="hint" role="status"></div>
       <div class="atts hidden" id="chatAtts"></div>
       <div class="row">
         <button class="ghost clip" onclick="$('#chatFile').click()" title="Прикрепить файлы (или перетащи их в чат, или вставь скриншот через Ctrl+V)">📎</button>
@@ -54,6 +56,7 @@
 <div class="offline hidden" id="offline"></div>
 <script src="/md.js"></script>
 <script src="/results.js"></script>
+<script src="/discussions.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

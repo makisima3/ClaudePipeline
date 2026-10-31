@@ -1,10 +1,12 @@
 """Изолированный демо-сервер для ручной проверки сайта/APK. Модели и Telegram не запускаются."""
 import json
+import re
 import threading
 from pathlib import Path
 
 import test_pipeline as fixture
 import results
+import discussions
 
 db, pl, main = fixture.db, fixture.pl, fixture.main
 
@@ -13,7 +15,19 @@ def run():
     class DemoRun(fixture.FakeRun):
         def start(self):
             self.on_session('demo-session-without-model')
-            self.on_text('Демонстрационный ответ. Вложения получены; модель не запускалась.')
+            cid = int(self.key.rsplit('-', 1)[1])
+            context = discussions.latest(cid)
+            if context:
+                answer = f"Демо без модели: обсуждаем **{context['project_name']} #{context['task_number']}**, результат №{context['result_id']}. Итог: {context['summary']}"
+                last = db.chat_messages(cid)[-1]['text'] or ''
+                if 'создай задачу' in last.lower() or 'create followup' in last.lower():
+                    notify = 'telegram_notify=true' in self.prompt.rsplit('Настройка устройства', 1)[-1]
+                    created = json.loads(pl._mcp('create_task', {'title': 'Увеличить кнопки', 'links': [context['task_id']],
+                                                               'telegram_notify': notify}, None, context['project_id']))
+                    answer += f"\n\nСоздана связанная задача #{created['task_number']}."
+                self.on_text(answer)
+            else:
+                self.on_text('Демонстрационный ответ. Вложения получены; модель не запускалась.')
             self.on_done({'is_error': False})
             return self
     pl.agent_run = lambda **kwargs: DemoRun(**kwargs)
@@ -54,6 +68,11 @@ def run():
     @main.route("GET", "/api/demo/info")
     def info(h, body, query):
         return {"project_id": pid, "second_project_id": second, "task_id": todo, "chat_id": cid, "question_task_id": question_task, "stub_agents": True}
+
+    @main.route("GET", "/api/demo/discussions")
+    def discussion_info(h, body, query):
+        return {"runs": len(fixture.FakeRun.instances), "tasks": db.q("SELECT id,title,telegram_notify FROM tasks"),
+                "messages": db.chat_messages(cid), "prompts": [r.prompt for r in fixture.FakeRun.instances]}
 
     srv = main.Server(("127.0.0.1", 0), main.Handler)
     output = fixture.SOURCE / "output/playwright/task-24"

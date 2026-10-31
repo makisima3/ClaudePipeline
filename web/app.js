@@ -48,7 +48,7 @@ const S = {
 async function api(method, url, body) {
   const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) { toast(d.error || `Ошибка ${r.status}`); throw new Error(d.error); }
+  if (!r.ok) { toast(d.error || `Ошибка ${r.status}`); throw Object.assign(new Error(d.error), { status: r.status }); }
   return d;
 }
 
@@ -160,12 +160,17 @@ async function loadChat() {
   await openChat(id);
 }
 
-async function openChat(id) {
+async function openChat(id, adopt = false, sending = false) {
+  if (S.chatSending && !sending) return;
   const ok = fresh("chat"), pid = S.projectId;
   S.chatListOpen = false;
-  if (!id) { S.chat = { id: null, pid, messages: [], running: false }; return renderChat(); }
+  if (!id) {
+    if (!await draftSwitch(pid, null, ok)) return;
+    S.chat = { id: null, pid, messages: [], running: false }; return renderChat();
+  }
   const r = await api("GET", `/api/chats/${id}/messages`);
   if (!ok() || pid !== S.projectId) return;
+  if (r.chat.project_id !== pid || !await draftSwitch(pid, id, () => ok() && pid === S.projectId, adopt)) return;
   const switched = S.chat.id !== id;
   S.chat = { id, pid, messages: r.messages, running: r.running };
   const i = S.chats.findIndex(x => x.id === id);
@@ -930,11 +935,14 @@ async function deleteProject() {
 }
 
 async function selectProject(id) {
-  if (id !== S.projectId) clearAtts();
+  if (S.chatSending) return toast('Дождитесь завершения отправки.');
+  draftSave();
+  if (id !== S.projectId) $('#chat').classList.add('hidden');
   S.projectId = id; ls.set("project", id);
   if (S.view === "settings") renderSettings();
   if (!["board", "onboarding", "results"].includes(S.view)) { S.view = "board"; ls.set("view", "board"); }
-  render(); loadBoard(); loadChat();
+  render(); $('#chat').classList.toggle('hidden', S.chat.pid !== id || !S.chatOpen || ['onboarding', 'results'].includes(S.view));
+  loadBoard(); await loadChat(); render();
   loadResultBadge(); if (S.view === 'results') loadResults();
 }
 
@@ -1025,7 +1033,7 @@ function renderChat(toBottom) {
 const msgHtml = m => {
   if (m.role === "assistant") return `<div class="msg assistant md">${refs(md(m.text), S.chat.pid)}</div>`;
   const atts = m.attachments?.length ? `<div class="msg-atts">${m.attachments.map((a, i) => attHtml(m.id, a, i)).join("")}</div>` : "";
-  return `<div class="msg ${m.role}">${m.text ? refs(esc(m.text), S.chat.pid) : ""}${atts}</div>`;
+  return `<div class="msg ${m.role}">${contextHtml(m.task_context)}${m.text ? refs(esc(m.text), S.chat.pid) : ""}${atts}</div>`;
 };
 
 const isImage = type => /^image\/(png|jpeg|gif|webp|bmp)$/.test(type || "");
@@ -1043,6 +1051,8 @@ const MAX_FILE = 20 * 1024 * 1024, MAX_FILES = 10, MAX_TOTAL = 100 * 1024 * 1024
 S.atts = [];  // [{file, name, preview}]
 
 function addFiles(files) {
+  if (D.value.pending || S.chatSending) return toast('Сначала подтвердите отправку черновика повтором.');
+  const previousCount = S.atts.length;
   for (let file of files) {
     if (S.atts.length >= MAX_FILES) { toast(`Не больше ${MAX_FILES} вложений в одном сообщении`); break; }
     if (file.size > MAX_FILE) { toast(`«${file.name}» больше 20 МБ (${fmtSize(file.size)}) — не прикрепляю`); continue; }
@@ -1054,13 +1064,15 @@ function addFiles(files) {
     }
     S.atts.push({ file, name, preview: isImage(file.type) ? URL.createObjectURL(file) : null });
   }
-  renderAtts();
+  if (S.atts.length > previousCount) D.value.filesMissing = 0;
+  renderAtts(); draftEdited(); renderDraftContext();
 }
 
 function removeAtt(i) {
+  if (D.value.pending || S.chatSending) return;
   const [a] = S.atts.splice(i, 1);
   if (a?.preview) URL.revokeObjectURL(a.preview);
-  renderAtts();
+  renderAtts(); draftEdited();
 }
 
 function clearAtts() { S.atts.forEach(a => a.preview && URL.revokeObjectURL(a.preview)); S.atts = []; renderAtts(); }
@@ -1082,19 +1094,34 @@ const fileBase64 = file => new Promise((ok, fail) => {
 
 async function chatSend() {
   const inp = $("#chatInput"), text = inp.value.trim();
-  if ((!text && !S.atts.length) || !S.projectId || S.chatSending) return;
-  if (S.chat.running) return toast("Подожди, я ещё отвечаю в этом чате");
+  if ((!text && !S.atts.length && !D.value.pending) || !S.projectId || S.chatSending) return;
+  if (S.chat.pid !== S.projectId) return toast('Дождитесь загрузки чата проекта.');
+  if (S.chat.running && !D.value.pending) return toast("Подожди, я ещё отвечаю в этом чате");
+  if (D.value.filesMissing && !D.value.pending) return toast('Прикрепите потерянные файлы заново или удалите их из черновика.');
   S.chatSending = true;
+  renderDraftContext();
+  let submitted = false;
   try {
+    if (!S.chat.id) await openChat((await api("POST", `/api/projects/${S.projectId}/chats`)).id, true, true);
+    D.value.request_id ||= crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    D.value.telegram_notify ??= telegramDefault();
+    D.value.pending = true; draftSave(); renderDraftContext();
+    if (D.value.filesMissing) {
+      submitted = true;
+      await api('POST', `/api/chats/${S.chat.id}/messages`, { client_request_id: D.value.request_id, receipt_only: true });
+      inp.value = ''; D.value = draftEmpty(); clearAtts(); draftSave(); return;
+    }
     const attachments = await Promise.all(S.atts.map(async a => ({ name: a.name, type: a.file.type, data: await fileBase64(a.file) })));
-    inp.value = "";
-    if (!S.chat.id) await openChat((await api("POST", `/api/projects/${S.projectId}/chats`)).id);  // первое сообщение в проекте
-    await api("POST", `/api/chats/${S.chat.id}/messages`, { text, attachments, telegram_notify: telegramDefault() });
-    clearAtts();
+    submitted = true;
+    await api("POST", `/api/chats/${S.chat.id}/messages`, { text, attachments, telegram_notify: D.value.telegram_notify,
+      task_context: D.value.context ? { task_id: D.value.context.task_id, result_id: D.value.context.result_id } : null,
+      client_request_id: D.value.request_id });
+    inp.value = ''; D.value = draftEmpty(); clearAtts(); draftSave();
   } catch (e) {
-    if (!inp.value) inp.value = text;
+    if (!submitted || e.status && e.status < 500) { D.value.pending = false; D.value.request_id = null; delete D.value.telegram_notify; draftSave(); }
+    else toast('Отправка не подтверждена. Черновик сохранён; повтор не создаст дубль сообщения.');
   } finally {
-    S.chatSending = false;
+    S.chatSending = false; renderDraftContext(); loadChat().catch(() => {});
   }
 }
 
@@ -1102,6 +1129,7 @@ async function chatStop() { if (S.chat.id) await api("POST", `/api/chats/${S.cha
 
 // «Новый» ничего не удаляет: старые чаты остаются в списке
 async function chatNew() {
+  if (S.chatSending) return toast('Дождитесь завершения отправки.');
   const c = await api("POST", `/api/projects/${S.projectId}/chats`);
   await loadChats(); await openChat(c.id);
   $("#chatInput").focus();
@@ -1259,6 +1287,7 @@ function toggleAnswered(on) { S.showAnswered = on; renderQuestions(); }
 $("#chatInput").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey && (!matchMedia('(pointer: coarse)').matches || e.ctrlKey || e.metaKey)) { e.preventDefault(); chatSend(); }
 });
+$("#chatInput").addEventListener('input', draftEdited);
 // Ctrl+V со скриншотом или скопированными файлами; обычный текст вставляется как раньше
 $("#chatInput").addEventListener("paste", e => {
   const dt = e.clipboardData;
@@ -1300,6 +1329,7 @@ window.App = {
   openOnboarding, onboardingMove, finishOnboarding,
   setTelegramDefault, openTelegramSettings, telegramAction, setTaskTelegram, retryTelegram,
   taskModelChanged, setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
+  discussResult, removeContext, openContextTask, dismissLostFiles,
   newTask, createTask, openTask, saveTask, comment, toTodo, stopTask, resetTask, deleteTask, closeModal,
   renderRefs, openTaskNumber, linkSearch, linkEnter, linkPick, unlinkTask,
   answer, answerText, toggleAnswered, setSetting, clearPause, restartTracker, addColumn, columnMenu,
