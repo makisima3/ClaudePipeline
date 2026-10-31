@@ -13,6 +13,7 @@
   <div class="projects" id="projects"></div>
   <div class="nav">
     <button class="ghost" data-view="board" onclick="App.setView('board')">Доска</button>
+    <button class="ghost" data-view="results" onclick="App.setView('results')">Результаты <span id="rbadge"></span></button>
     <button class="ghost" data-view="questions" onclick="App.setView('questions')">Вопросы <span id="qbadge"></span></button>
     <button class="ghost" data-view="settings" onclick="App.setView('settings')">Настройки</button>
     <button class="ghost" id="chatBtn" onclick="App.toggleChat()">Чат</button>
@@ -42,6 +43,7 @@
       <div class="row">
         <button class="ghost clip" onclick="$('#chatFile').click()" title="Прикрепить файлы (или перетащи их в чат, или вставь скриншот через Ctrl+V)">📎</button>
         <textarea id="chatInput" class="grow" placeholder="Напиши, что сделать: «создай задачи по этому тексту…», «что с задачей 5?», «включи пайплайн». Enter — отправить, Shift+Enter — перенос. Скриншот — Ctrl+V, файлы — скрепкой или перетаскиванием"></textarea>
+        <button class="primary" onclick="App.chatSend()" aria-label="Отправить сообщение">↑</button>
       </div>
       <input type="file" id="chatFile" multiple hidden>
     </div>
@@ -51,6 +53,7 @@
 <div id="modal"></div>
 <div class="offline hidden" id="offline"></div>
 <script src="/md.js"></script>
+<script src="/results.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

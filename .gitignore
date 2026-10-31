@@ -22,3 +22,7 @@ desktop.ini
 # локальные визуальные проверки
 output/playwright/
 .playwright-cli/
+
+# Android: локальный ключ подписи и результаты изолированной сборки
+android/.local/
+android/build/

@@ -21,6 +21,7 @@ if __name__ == "__main__":
 
 import db
 import pipeline as pl
+import results
 from runner import PORT, NO_WINDOW
 from updater import updater
 from git_readiness import check as check_git_readiness
@@ -52,10 +53,54 @@ def need(cond, msg="Не найдено", code=404):
 
 
 # ---------------- состояние ----------------
+def result_number(query, key, default=0):
+    value = query.get(key, [str(default)])[0]
+    need(value.isdecimal() and len(value) <= 18, f"Некорректный {key}", 400)
+    return int(value)
+
+
+@route("GET", "/api/results/meta")
+def api_results_meta(h, body, query):
+    return {"installation_id": results.installation_id(), "latest_id": db.one("SELECT COALESCE(MAX(id),0) AS n FROM task_results")["n"],
+            "version": 1}
+
+
+@route("GET", "/api/results")
+def api_results(h, body, query):
+    return results.page(after=result_number(query, "after"), limit=min(100, max(1, result_number(query, "limit", 50))))
+
+
+@route("GET", r"/api/projects/(\d+)/results")
+def api_project_results(h, body, query, pid):
+    need(db.one("SELECT id FROM projects WHERE id=?", (pid,)))
+    return results.page(pid, after=result_number(query, "after"), before=result_number(query, "before"),
+                        limit=min(100, max(1, result_number(query, "limit", 50))))
+
+
+@route("GET", r"/api/results/(\d+)")
+def api_result(h, body, query, rid):
+    row = db.one("SELECT * FROM task_results WHERE id=?", (rid,))
+    need(row)
+    return results.public(row, detail=True)
+
+
+@route("GET", r"/api/results/(\d+)/files/(\d+)")
+def api_result_file(h, body, query, rid, index):
+    row = db.one("SELECT files FROM task_results WHERE id=?", (rid,))
+    need(row)
+    files = json.loads(row["files"])
+    need(index < len(files))
+    f = files[index]
+    path = (results.ROOT / f["path"]).resolve()
+    need(path.is_relative_to(results.ROOT.resolve()) and path.is_file(), "Материал недоступен")
+    return h.send_file(path, f["name"], f["type"], download="download" in query)
+
+
 @route("GET", "/api/state")
 def api_state(h, body, query):
     return {
         "boot_id": pl.BOOT_ID,
+        "installation_id": results.installation_id(),
         "agent": runtime.AGENT,
         "agent_name": runtime.NAME,
         "agent_info": pl.agent_info(),
@@ -638,6 +683,48 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
         return None
 
+    def send_file(self, path, name, ctype, download=False):
+        size, start, end = path.stat().st_size, 0, path.stat().st_size - 1
+        byte_range = self.headers.get("Range")
+        if byte_range:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", byte_range)
+            if not match or not any(match.groups()):
+                return self.send_json({"error": "Некорректный диапазон"}, 416)
+            left, right = match.groups()
+            if left:
+                start, end = int(left), min(int(right) if right else end, end)
+            else:
+                start = max(0, size - int(right))
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+        safe = ctype in ("image/png", "image/jpeg", "image/gif", "image/webp", "video/mp4", "video/webm", "audio/mpeg", "audio/ogg")
+        self.send_response(206 if byte_range else 200)
+        self.send_header("Content-Type", ctype if safe else "application/octet-stream")
+        self.send_header("Content-Disposition", f"{'inline' if safe and not download else 'attachment'}; filename*=UTF-8''{quote(name, safe='')}")
+        self.send_header("Content-Length", str(max(0, end - start + 1)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "sandbox")
+        if byte_range:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        try:
+            with path.open("rb") as stream:
+                stream.seek(start)
+                remaining = end - start + 1
+                while remaining > 0:
+                    chunk = stream.read(min(256 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+
     def _static(self, path):
         if path in ("/", "") or path.startswith("/report/"):
             path = "/index.html" if not path.startswith("/report/") else "/report.html"
@@ -791,6 +878,7 @@ def main():
     telegram.stopping = lambda: bool(pl.restart.since)
     telegram.running_tasks = lambda: set(pl.orch.runs)
     telegram.recover()
+    results.recover()
     threading.Thread(target=pl.orch.loop, daemon=True).start()
     threading.Thread(target=updater.loop, daemon=True).start()
     threading.Thread(target=pl.titler.loop, daemon=True).start()

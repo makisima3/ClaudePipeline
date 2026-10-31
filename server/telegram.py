@@ -45,6 +45,12 @@ def prepare(t, summary, text=None, files=None, staged=False):
     repair = existing and existing["state"] == "error" and existing["next_part"] == 0 and json.loads(existing["payload"])[0].get("error")
     if existing and not repair:
         return
+    # Новые завершения всегда имеют общий снимок; позднее включение Telegram берёт те же материалы.
+    import results
+    saved = results.existing(t)
+    if saved:
+        text = saved["text"]
+        files = [str(results.ROOT / f["path"]) for f in json.loads(saved["files"])]
     token = uuid.uuid4().hex
     folder = RESULTS / token
     label = f"{t['project_name']} #{t['task_number']}"
@@ -54,6 +60,8 @@ def prepare(t, summary, text=None, files=None, staged=False):
     error = None
     try:
         folder.mkdir(parents=True, exist_ok=True)
+        if saved and saved["error"]:
+            raise ValueError(saved["error"])
         if not isinstance(files or [], list) or len(files or []) > 10:
             raise ValueError("Можно подготовить до 10 вложений.")
         total = 0

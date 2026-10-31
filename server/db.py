@@ -75,6 +75,18 @@ CREATE TABLE IF NOT EXISTS telegram_deliveries (
     next_part INTEGER NOT NULL DEFAULT 0, error TEXT, created_at REAL, updated_at REAL,
     UNIQUE(task_id, run_key)
 );
+CREATE TABLE IF NOT EXISTS result_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS task_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    source_task_id INTEGER NOT NULL, task_number INTEGER NOT NULL,
+    project_name TEXT NOT NULL, title TEXT NOT NULL, run_key TEXT NOT NULL,
+    summary TEXT NOT NULL, text TEXT NOT NULL, report TEXT NOT NULL,
+    files TEXT NOT NULL, error TEXT, created_at REAL NOT NULL,
+    UNIQUE(source_task_id, run_key)
+);
+CREATE INDEX IF NOT EXISTS results_project ON task_results(project_id, id);
 """
 
 DEFAULT_SETTINGS = {

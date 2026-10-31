@@ -42,7 +42,7 @@ const COLORS = ["#c8642c", "#3b6fd8", "#2f8a57", "#9b4dca", "#d64571", "#b07a12"
 
 const S = {
   state: null, view: ls.get("view", "board"), projectId: ls.get("project", null), board: null,
-  chatOpen: ls.get("chatOpen", true), chat: { id: null, pid: null, messages: [], running: false }, chats: [], task: null, showAnswered: false,
+  chatOpen: ls.get("chatOpen", !matchMedia('(max-width: 900px)').matches), chat: { id: null, pid: null, messages: [], running: false }, chats: [], task: null, showAnswered: false,
 };
 
 async function api(method, url, body) {
@@ -202,10 +202,11 @@ function renderHeader() {
 function render() {
   renderHeader();
   renderWelcome();
-  $("#chat").classList.toggle("hidden", !S.chatOpen || !S.projectId || S.view === "onboarding");
+  $("#chat").classList.toggle("hidden", !S.chatOpen || !S.projectId || ['onboarding', 'results'].includes(S.view));
   if (S.view === "board") renderBoard();
   else if (S.view === "questions") renderQuestions();
   else if (S.view === "onboarding") renderOnboarding();
+  else if (S.view === "results") renderResults();
   else renderSettings();
 }
 
@@ -322,8 +323,10 @@ async function createTask() {
 async function openTask(id) {
   const ok = fresh("task");
   const t = await api("GET", `/api/tasks/${id}`);
+  const b = S.board?.project.id === t.project_id ? S.board : await api('GET', `/api/projects/${t.project_id}/board`);
   if (!ok()) return;
   S.task = t;
+  S.taskColumns = b.columns;
   S.linkRes = []; S.linkContext = null;
   modal(`
     <div class="row"><input class="title-input grow" id="tt-title" value="${esc(t.title)}"><span class="muted">${esc(t.project_name)} #${t.task_number}</span></div>
@@ -412,7 +415,7 @@ function renderTaskDyn() {
   $("#tt-line").innerHTML = `${t.project_id !== S.projectId ? `${esc(t.project_name)} · ` : ""}${esc(t.column_name)} ${pill(t.status)} ${t.cost_usd ? `· ≈$${t.cost_usd.toFixed(2)} (эквивалент API)` : ""}
     ${t.session_id ? `· сессия <code title="${S.state.agent === 'codex' ? 'codex resume' : 'claude --resume'} ${t.session_id}">${t.session_id.slice(0, 8)}</code>` : ""}`;
   const open = t.questions.filter(q => q.status === "open");
-  let html = "";
+  let html = `<label for="tt-column">Переместить в колонку</label><select id="tt-column" ${t.running ? 'disabled' : ''} onchange="App.moveTaskColumn(+this.value)">${(S.taskColumns || []).map(c => `<option value="${c.id}" ${c.id === t.column_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`;
   if (t.status === "error" && t.error) html += `<div class="callout err">${esc(t.error)}</div>`;
   if (t.summary) html += `<div class="callout ok"><b>Итог:</b> ${esc(t.summary)} ${t.report_path ? ` · <a href="/report/${t.id}" target="_blank">подробный отчёт →</a>` : ""}</div>`;
   const d = t.telegram_delivery;
@@ -494,6 +497,16 @@ async function toTodo(id) {
   const col = b.columns.find(c => c.kind === "todo");
   await api("POST", `/api/tasks/${id}/move`, { column_id: col.id, order: [...b.tasks.filter(t => t.column_id === col.id).map(t => t.id), id] });
   loadBoard(); refreshTask();
+}
+
+async function moveTaskColumn(columnId) {
+  const t = S.task;
+  if (!t || t.column_id === columnId) return;
+  try {
+    const b = await api('GET', `/api/projects/${t.project_id}/board`);
+    await api('POST', `/api/tasks/${t.id}/move`, { column_id: columnId, order: [...b.tasks.filter(x => x.column_id === columnId && x.id !== t.id).map(x => x.id), t.id] });
+    loadBoard(); await refreshTask();
+  } catch { renderTaskDyn(); }
 }
 
 async function stopTask(id) { await api("POST", `/api/tasks/${id}/stop`); toast("Останавливаю…"); }
@@ -585,6 +598,7 @@ function renderOnboarding() {
     <p class="hint">GitHub CLI необязателен. Существующий SSH/HTTPS-доступ сохраняется. Проверка не делает push и не подтверждает право записи.</p>
     <button onclick="App.openGitSettings()">Настройка и проверка Git</button>`;
   const telegram = `<p>Итог и материалы задачи придут в «Избранное» твоего аккаунта. Для этого на ПК с трекером нужны дополнительные Playwright и Chromium, вход по QR и тестовое сообщение.</p>
+    <p>Раздел «Результаты» всегда сохраняет итоги и материалы на сервере и доступен на сайте и в Android-приложении. Telegram не нужен для этой истории. В приложении уведомления включаются отдельно; Android может задерживать фоновые проверки.</p>
     <div class="onboarding-status" id="onboarding-telegram" role="status">Читаю состояние подключения…</div>
     <p>Переключатель «Результаты в Telegram» запоминается на устройстве: на телефоне по умолчанию включён, на ПК выключен. Он задаёт начальный флаг новым задачам; в каждой карточке флаг можно изменить отдельно.</p>
     <p class="hint">Telegram необязателен. Установка компонентов, вход, проверка сессии и тест в «Избранное» доступны в общих настройках.</p>
@@ -624,6 +638,7 @@ function renderSettings() {
   const s = S.state.settings, p = project();
   $("#view").innerHTML = `<div class="pad">
     <h2>Настройки · ${esc(S.state.agent_name)}</h2>
+    ${platformSettings()}
     <div class="section" id="onboarding-settings"><h3>Первое знакомство</h3>
       <p class="hint">Работа с задачами и необязательные интеграции. Просмотр шагов не подключает сервисы.</p>
       <button onclick="App.openOnboarding(${onboardingActive})">${onboardingActive ? "Вернуться к мастеру" : "Открыть мастер"}</button></div>
@@ -918,8 +933,9 @@ async function selectProject(id) {
   if (id !== S.projectId) clearAtts();
   S.projectId = id; ls.set("project", id);
   if (S.view === "settings") renderSettings();
-  if (!["board", "onboarding"].includes(S.view)) { S.view = "board"; ls.set("view", "board"); }
+  if (!["board", "onboarding", "results"].includes(S.view)) { S.view = "board"; ls.set("view", "board"); }
   render(); loadBoard(); loadChat();
+  loadResultBadge(); if (S.view === 'results') loadResults();
 }
 
 // ---------------- колонки ----------------
@@ -1117,7 +1133,11 @@ async function deleteChat(id) {
   if (id === S.chat.id) await openChat(S.chats[0]?.id || null);
   S.chatListOpen = true; renderChatHead();
 }
-function toggleChat() { S.chatOpen = !S.chatOpen; ls.set("chatOpen", S.chatOpen); render(); if (S.chatOpen) loadChat(); }
+function toggleChat() {
+  if (S.view === 'results') { S.view = 'board'; ls.set('view', 'board'); S.chatOpen = true; }
+  else S.chatOpen = !S.chatOpen;
+  ls.set("chatOpen", S.chatOpen); render(); if (S.chatOpen) loadChat();
+}
 
 // ---------------- пайплайн ----------------
 async function togglePipeline() {
@@ -1157,6 +1177,7 @@ async function resync(full) {
   await loadState().catch(() => { });
   loadBoard().catch(() => { }); refreshTask();
   if (full) { loadChat().catch(() => { }); refreshQuestions(); }
+  loadResultBadge(); if (S.view === 'results') loadResults();
 }
 const resyncD = debounce(() => resync(), 300);
 
@@ -1170,6 +1191,7 @@ function onEvent(m) {
   } else if (m.type === "offline") {
     setOffline(true);
   } else if (m.type === "changed") {
+    if (!m.project_id || m.project_id === S.projectId) { loadResultBadge(); if (S.view === 'results') loadResults(); }
     if (!m.project_id || m.project_id === S.projectId) refreshBoard();
     if (!m.project_id) refreshState();
     refreshTaskD(); refreshQuestions();
@@ -1231,11 +1253,11 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 window.addEventListener("focus", resyncD);
 
 // пока открыт другой вид, события доску не перечитывают — при возврате берём свежую
-function setView(v) { S.view = v; ls.set("view", v === "onboarding" ? "board" : v); render(); if (v === "board") loadBoard(); }
+function setView(v) { S.view = v; ls.set("view", v === "onboarding" ? "board" : v); render(); if (v === "board") loadBoard(); if (v === 'results') loadResults(); }
 function toggleAnswered(on) { S.showAnswered = on; renderQuestions(); }
 
 $("#chatInput").addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); chatSend(); }
+  if (e.key === "Enter" && !e.shiftKey && (!matchMedia('(pointer: coarse)').matches || e.ctrlKey || e.metaKey)) { e.preventDefault(); chatSend(); }
 });
 // Ctrl+V со скриншотом или скопированными файлами; обычный текст вставляется как раньше
 $("#chatInput").addEventListener("paste", e => {
@@ -1273,6 +1295,8 @@ document.addEventListener("click", e => {
 });
 
 window.App = {
+  loadResults, readResults, openResult, androidBack,
+  moveTaskColumn,
   openOnboarding, onboardingMove, finishOnboarding,
   setTelegramDefault, openTelegramSettings, telegramAction, setTaskTelegram, retryTelegram,
   taskModelChanged, setView, selectProject, newProject, createProject, pickFolder, updateProject, setProjectActive, deleteProject,
@@ -1290,6 +1314,9 @@ window.App = {
   if (new URLSearchParams(location.search).get("setup") === "telegram") openTelegramSettings();
   connect();  // подписываемся до загрузки доски и чата, чтобы не потерять события, пришедшие во время неё
   await loadBoard();
+  loadResultBadge(); if (S.view === 'results') loadResults();
+  const resultId = new URLSearchParams(location.search).get('result_id');
+  if (/^\d+$/.test(resultId || '')) await openResult(+resultId);
   const taskId = new URLSearchParams(location.search).get("task_id");
   if (/^\d+$/.test(taskId || "")) await openTask(+taskId);
   if (S.chatOpen) loadChat();

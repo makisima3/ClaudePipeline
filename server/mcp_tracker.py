@@ -69,9 +69,9 @@ TASK_TOOLS = [
         "name": "finish_task",
         "description": "Завершить задачу. summary — 1-3 предложения для карточки. report — подробный отчёт в markdown: "
                        "что сделано и как, изменённые файлы, как проверить, принятые решения, открытые вопросы. "
-                       "Для Telegram подготовь telegram_text и telegram_files: краткий итог и пути к материалам, "
+                       "Всегда подготовь result_text и result_files: краткий итог и пути к материалам общей ленты, независимо от Telegram. "
                        "для визуальных изменений — скриншоты. Файлы копируются до выхода агента, доставляет сервер.",
-        "inputSchema": S({"summary": STR, "report": STR, "telegram_text": STR,
+        "inputSchema": S({"summary": STR, "report": STR, "result_text": STR, "result_files": {"type": "array", "items": STR}, "telegram_text": STR,
                           "telegram_files": {"type": "array", "items": STR}, "telegram_notify": BOOL}, ["summary", "report"]),
     },
     CREATE_TASK,

@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 import db
+import results
 from runner import CLAUDE, NO_WINDOW, ClaudeRun, short_tool
 from runtime import AGENT, NAME
 from telegram import telegram, prepare as prepare_telegram, delivery as telegram_delivery
@@ -125,6 +126,7 @@ TASK_SYSTEM = """Ты — исполнитель задач в личном па
 - Git. Режим указан в промпте задачи строкой «Git: …». Если он не off и папка проекта — git-репозиторий: в начале посмотри `git status`, чтобы отличать чужие незакоммиченные изменения от своих; в конце, перед finish_task, закоммить ТОЛЬКО изменения своей задачи с сообщением `<проект> #<task_number> <заголовок задачи>` и 2–5 строками, что сделано; в описании коммита укажи технический task_id. Не связанные между собой изменения — отдельными коммитами. Файлы добавляй явно по путям (общий файл — по кускам: `git diff` → свой патч → `git apply --cached`), без `git add -A`. Чужие незакоммиченные изменения не трогай, не откатывай и не включай — упомяни их в отчёте. В режиме commit_push после коммита сделай `git push` без force; если push не прошёл (нет сети, конфликт, отказ), ничего не обходи (никаких force, rebase, reset) — напиши об этом в отчёте. Режим off или папка не git-репозиторий — git не трогай.
 - Для Git используй существующую авторизацию и конфигурацию проекта. Интерактивный вход пользователь проходит сам; не перенастраивай доступ без его просьбы. Не выводи токены/ключи и URL с секретами в UI, логи или отчёт; ошибку push описывай понятной причиной без секретов. Вход gh или успешное чтение не гарантируют право записи в репозиторий/ветку. Если конфигурация push включает mirror или принудительные refspec, push пропусти и объясни причину в отчёте.
 - В конце ОБЯЗАТЕЛЬНО вызови mcp__tracker__finish_task: summary — 1-3 предложения, report — подробный markdown (что сделано и как, изменённые файлы, как проверить, принятые решения, открытые вопросы).
+- ВСЕГДА подготовь result_text и result_files для общей ленты «Результаты», независимо от telegram_notify и подключения Telegram. Это итог и реально подготовленные материалы (для визуальных изменений — скриншоты, видео — если полезно и доступно). Файлы должны существовать при finish_task; сервер сохраняет независимые снимки. Прежние telegram_text/telegram_files — совместимые имена тех же общих материалов; для Telegram используются они же. Готовность и флаг Telegram не отменяют подготовку результата. Общие функции и исправления трекера проверяй и на сайте, и в Android; различия платформ фиксируй явно.
 - Если для задачи включён Telegram или пользователь явно просит прислать результат в ТГ, подготовь в finish_task telegram_text (кратко: что сделано и что действительно проверено) и telegram_files (пути к материалам). Для визуальных изменений, особенно игровых, приложи скриншоты; короткое видео — когда оно помогает показать движение/взаимодействие и его реально можно записать. О пройденных тестах пиши только если они запускались и прошли. Явную просьбу учти через telegram_notify=true. Файлы должны существовать при вызове finish_task: трекер скопирует их и сам доставит после выхода агента, напрямую ничего не отправляй. Инструкция: {telegram_guide}.
 - Если задача меняла код самого трекера AgentPipeline (папка server/), после finish_task вызови mcp__tracker__restart_tracker: трекер перезапустится сам, когда твой процесс завершится. Сервер трекера руками не останавливай и не перезапускай.
 - Пиши по-русски."""
@@ -457,9 +459,12 @@ def _finish_task(tid, summary, report, telegram_text=None, telegram_files=None, 
     if telegram_notify is True:
         db.update_task(tid, telegram_notify=1)
         t["telegram_notify"] = 1
-    if t["telegram_notify"]:
-        prepare_telegram(t, summary, telegram_text, telegram_files, staged=t["status"] != "done")
+    result = results.prepare(t, summary, report, telegram_text, telegram_files)
     if t["status"] == "done" and t["summary"] == summary:
+        # Совместимость со старым исполнителем и повторным finish до перезапуска.
+        results.save(result)
+        if t["telegram_notify"]:
+            prepare_telegram(t, summary)
         return  # повтор события завершения не создаёт новый отчёт или сообщение
     path = db.DATA / "reports" / f"task-{tid}.md"
     stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -481,6 +486,9 @@ def _finish_task(tid, summary, report, telegram_text=None, telegram_files=None, 
         db._conn.execute("BEGIN IMMEDIATE")
         try:
             db.move_task(tid, "done", status="done", summary=summary, report_path=str(path))
+            results.save(result)
+            if t["telegram_notify"]:
+                prepare_telegram(t, summary)
             db.ex("""UPDATE telegram_deliveries SET state=CASE WHEN error IS NULL THEN 'pending' ELSE 'error' END
                      WHERE task_id=? AND run_key=? AND state='prepared'""", (tid, str(t["last_run_at"] or t["created_at"])))
             db._conn.execute("COMMIT")
@@ -526,7 +534,8 @@ def on_manual_move(tid, kind):
     if kind == "todo":
         db.update_task(tid, status="queued")
     elif kind == "done":
-        db.update_task(tid, status="done")
+        finish_task(tid, t["summary"] or "Задача отмечена выполненной вручную.",
+                    "Задача перенесена в «Готово» вручную. Автоматические проверки при этом не запускались.")
     elif kind == "backlog" and t["status"] not in ("running",):
         db.update_task(tid, status="idle")
     if kind in ("todo", "done", "backlog"):
@@ -915,7 +924,7 @@ def _mcp(tool, a, tid, pid):
         task_event(tid, "progress", a["text"])
         return "Ок"
     if tool == "finish_task":
-        finish_task(tid, a["summary"], a["report"], a.get("telegram_text"), a.get("telegram_files"), a.get("telegram_notify"))
+        finish_task(tid, a["summary"], a["report"], a.get("result_text", a.get("telegram_text")), a.get("result_files", a.get("telegram_files")), a.get("telegram_notify"))
         return "Задача закрыта, отчёт сохранён. Заверши ход."
     if tool == "approve":
         if not tid:  # чат: разрешаем, пользователь сам на странице
